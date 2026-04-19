@@ -1,0 +1,2 @@
+aiosmtpd==1.4.4
+redis==5.0.1

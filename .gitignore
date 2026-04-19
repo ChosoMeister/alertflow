@@ -1,0 +1,71 @@
+# ========================
+# Environment & Secrets
+# ========================
+.env
+.env.local
+.env.production
+*.pem
+*.key
+
+# ========================
+# Python
+# ========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# ========================
+# Node.js / Next.js
+# ========================
+node_modules/
+web-ui/node_modules/
+web-ui/.next/
+web-ui/out/
+.next/
+
+# ========================
+# Docker
+# ========================
+# Don't ignore docker-compose.yml or Dockerfiles
+
+# ========================
+# IDE & OS
+# ========================
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# ========================
+# Logs & Temp
+# ========================
+*.log
+tmp/
+temp/
+
+# ========================
+# Redis data (local)
+# ========================
+dump.rdb
+
+# ========================
+# Misc
+# ========================
+.gemini/
+# Additional test scripts and workflow documents
+setup_rule.py
+verify_severity.py
+docs/Task.md
+Implementation-Plan.md
+docs/Implementation-Plan.md
