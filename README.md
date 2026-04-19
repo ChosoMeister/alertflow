@@ -4,6 +4,8 @@
 
 > An intelligent, AI-powered email alert processor, analyzer, and multi-channel notification dispatcher.
 
+![Dashboard Demo](./docs/dashboard_demo.webp)
+
 AlertFlow acts as a smart middleware between your infrastructure monitoring tools (e.g., Zabbix, Prometheus, Grafana, Backup tools, Cronjobs) and your team's communication channels (Telegram, Matrix, Webhooks, SMS). 
 
 Instead of overwhelming your team with raw, noisy, and unstructured emails, Sentinel ingests email alerts via its built-in SMTP server, processes them using Large Language Models (LLMs) to extract structured insights (Severity, Category, System Name, Actionable Summary), and dynamically routes them to the correct channels based on customizable rules.
