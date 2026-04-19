@@ -4,7 +4,14 @@
 
 > An intelligent, AI-powered email alert processor, analyzer, and multi-channel notification dispatcher.
 
-![Dashboard Demo](./docs/dashboard_demo.webp)
+### 📸 Dashboard Snapshots
+<p align="center">
+  <img src="./docs/demo_dashboard.png" width="800" alt="Dashboard Overview">
+  <br>
+  <img src="./docs/demo_alerts.png" width="800" alt="Alert Details">
+  <br>
+  <img src="./docs/demo_rules.png" width="800" alt="Routing Rules UI">
+</p>
 
 AlertFlow acts as a smart middleware between your infrastructure monitoring tools (e.g., Zabbix, Prometheus, Grafana, Backup tools, Cronjobs) and your team's communication channels (Telegram, Matrix, Webhooks, SMS). 
 
