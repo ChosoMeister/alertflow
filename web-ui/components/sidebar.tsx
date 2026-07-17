@@ -1,7 +1,7 @@
 'use client';
 
-import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { useTranslations } from 'next-intl';
+import { Link, usePathname } from '@/navigation';
 import { cn } from '@/lib/utils';
 import {
     LayoutDashboard,
@@ -16,30 +16,35 @@ import {
     LogOut,
     Bot,
     Bell,
+    BarChart3,
 } from 'lucide-react';
+import { LanguageSwitcher } from './LanguageSwitcher';
 
-const navigation = [
-    { name: 'Overview', href: '/', icon: LayoutDashboard },
-    { name: 'Alerts', href: '/alerts', icon: AlertCircle },
-    { name: 'Routing Rules', href: '/routing', icon: Route },
-    { name: 'Queue', href: '/queue', icon: Layers },
-    { name: 'AI Providers', href: '/ai-providers', icon: Bot },
-    { name: 'Channels', href: '/notification-channels', icon: Bell },
-    { name: 'SMTP Debugger', href: '/smtp', icon: Mail },
-    { name: 'Logs', href: '/logs', icon: ScrollText },
-    { name: 'Settings', href: '/settings', icon: Settings },
+const getNavigation = (t: any) => [
+    { name: t('dashboard'), href: '/', icon: LayoutDashboard },
+    { name: t('alerts'), href: '/alerts', icon: AlertCircle },
+    { name: t('analytics'), href: '/analytics', icon: BarChart3 },
+    { name: t('routing'), href: '/routing', icon: Route },
+    { name: t('queue'), href: '/queue', icon: Layers },
+    { name: t('providers'), href: '/ai-providers', icon: Bot },
+    { name: t('channels'), href: '/notification-channels', icon: Bell },
+    { name: t('smtp'), href: '/smtp', icon: Mail },
+    { name: t('logs'), href: '/logs', icon: ScrollText },
+    { name: t('settings'), href: '/settings', icon: Settings },
 ];
 
 export function Sidebar() {
     const pathname = usePathname();
+    const t = useTranslations('Navigation');
+    const navigation = getNavigation(t);
 
     const handleLogout = () => {
-        localStorage.removeItem('sentinel_token');
+        localStorage.removeItem('alertflow_token');
         window.location.href = '/login';
     };
 
     return (
-        <aside className="fixed inset-y-0 left-0 z-50 w-64 bg-card border-r border-border">
+        <aside className="fixed inset-y-0 ltr:left-0 rtl:right-0 z-50 w-64 bg-card border-r border-border rtl:border-l rtl:border-r-0">
             <div className="flex h-full flex-col">
                 {/* Logo */}
                 <div className="flex h-16 items-center px-6 border-b border-border">
@@ -47,7 +52,7 @@ export function Sidebar() {
                         <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
                             <span className="text-white font-bold text-sm">S</span>
                         </div>
-                        <span className="font-semibold text-lg">Sentinel AI</span>
+                        <span className="font-semibold text-lg">AlertFlow</span>
                     </div>
                 </div>
 
@@ -75,14 +80,18 @@ export function Sidebar() {
                     })}
                 </nav>
 
-                {/* Logout */}
-                <div className="border-t border-border p-3">
+                {/* Footer / Actions */}
+                <div className="border-t border-border p-3 flex flex-col gap-2">
+                    <div className="flex items-center justify-between px-3 py-2 text-sm text-muted-foreground">
+                        <span>{t('language')}</span>
+                        <LanguageSwitcher />
+                    </div>
                     <button
                         onClick={handleLogout}
-                        className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                        className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-destructive hover:bg-destructive/10 transition-colors"
                     >
                         <LogOut className="h-5 w-5" />
-                        Logout
+                        {t('logout')}
                     </button>
                 </div>
             </div>

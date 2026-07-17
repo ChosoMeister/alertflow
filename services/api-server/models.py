@@ -53,7 +53,7 @@ class TestEmailRequest(BaseModel):
     from_email: str = Field(..., min_length=1)
     to_email: str = Field(default="test@localhost")
     subject: str = Field(default="Test Alert")
-    body: str = Field(default="This is a test alert from Sentinel-AI-Core.")
+    body: str = Field(default="This is a test alert from AlertFlow.")
 
 
 class TestEmailResponse(BaseModel):
@@ -90,6 +90,9 @@ class Alert(BaseModel):
     main_message: str = ""
     details: str = ""
     ai_raw: str = ""
+    incident_key: str = ""
+    duplicate_of: str = ""
+    telegram_message_id: str = ""
     created_at: str
     updated_at: str
 
@@ -121,3 +124,11 @@ class QueueMetrics(BaseModel):
     processed_count: int = 0
     error_count: int = 0
     muted_count: int = 0
+
+
+class GeneralSettings(BaseModel):
+    """System-wide general configuration."""
+    alert_retention_days: int = Field(default=14, ge=1, le=365)
+    summary_telegram_chat_id: str = ""
+    summary_telegram_thread_id: str = "0"
+    summary_telegram_bot_token: str = ""

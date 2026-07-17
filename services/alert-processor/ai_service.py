@@ -13,18 +13,32 @@ logger = logging.getLogger("AI-Service")
 # Redis Config
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 
 # Default Fallback Config (used if no providers in Redis)
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1/chat/completions")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434/v1/chat/completions")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:120b")
 
 # Message Verbosity
 MESSAGE_VERBOSITY = os.getenv("MESSAGE_VERBOSITY", "standard")
 
+# Singleton Redis client
+_redis_client = None
+
 
 def get_redis_client():
-    """Get Redis client."""
-    return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+    """Get singleton Redis client."""
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = redis.Redis(
+            host=REDIS_HOST, port=REDIS_PORT,
+            password=REDIS_PASSWORD or None,
+            decode_responses=True,
+            socket_timeout=5,
+            socket_connect_timeout=5,
+            retry_on_timeout=True,
+        )
+    return _redis_client
 
 
 def get_default_provider():
@@ -45,7 +59,7 @@ def get_default_provider():
                     "api_key": provider.get("api_key", ""),
                     "timeout": int(provider.get("timeout", 120)),
                 }
-        
+
         # If no default, use first available
         for pid in provider_ids:
             provider = r.hgetall(f"ai_provider:{pid}")
@@ -61,7 +75,7 @@ def get_default_provider():
                 }
     except Exception as e:
         logger.warning(f"Could not get provider from Redis: {e}")
-    
+
     # Fallback to environment variables
     return {
         "id": "env-fallback",
@@ -74,65 +88,98 @@ def get_default_provider():
     }
 
 
-def build_system_prompt():
+def build_system_prompt(active_incidents_text=""):
     """Build system prompt for email analysis."""
-    return """You are an expert IT operations alert analyst. Your job is to read raw alert emails and produce a concise, actionable summary that an engineer can read in 10 seconds and immediately know what is broken and how to fix it.
+
+    context_instruction = ""
+    if active_incidents_text:
+        context_instruction = f"""
+Here is a list of currently ACTIVE (open) incidents for this sender:
+{active_incidents_text}
+
+CRITICAL MATCHING TASK:
+You must determine if this new alert is related to any of the ACTIVE incidents above.
+- If it resolves an active incident, set action="RESOLVE" and target_incident_id="[the ID from the list]".
+- If it is an update/repetition of an active incident, set action="UPDATE" and target_incident_id="[the ID from the list]".
+- If it is a completely new and unrelated issue, set action="NEW" and target_incident_id="".
+- IMPORTANT: If this is an "UP" or "RESOLVED" alert but there are NO matching active incidents, it has nothing to resolve. You MUST set action="NEW" because it is a standalone notification.
+"""
+    else:
+        context_instruction = """
+There are currently no active incidents for this sender. This must be a NEW incident.
+Set action="NEW" and target_incident_id="".
+"""
+
+    return f"""You are an expert IT operations alert analyst. Your job is to read raw alert emails and produce a concise, actionable summary that an engineer can read in 10 seconds and immediately know what is broken and how to fix it.
 
 Rules:
 - Be extremely concise. No filler words. No obvious advice.
 - The "main_message" must be ONE sentence describing WHAT failed and WHY.
 - The "details" must be a list of short bullet-point strings with ONLY the key technical facts (hostnames, IPs, file paths, error codes, counts, timestamps). Never dump raw dicts or JSON.
-- The "recommended_actions" must be 1-2 SPECIFIC actions. Do NOT give generic advice like "check logs" or "verify permissions". Instead say exactly WHAT to check WHERE, e.g. "Fix read permissions on 10.20.41.23:/var/backups/postgres/jira/ for the backup user".
+- The "recommended_actions" must be 1-2 SPECIFIC actions. Do NOT give generic advice like "check logs" or "verify permissions". Instead say exactly WHAT to check WHERE, e.g. "Fix read permissions on 192.0.2.10:/var/backups/postgres/jira/ for the backup user".
 - If the alert is about a partial failure (e.g. 3 of 12 files failed), mention the ratio.
-
+{context_instruction}
 Extract these fields:
 1. severity: One of "Critical", "High", "Medium", "Low", "Info"
 2. category: One of "Auth", "Backup", "Database", "Network", "System", "Service", "Storage", "Hardware", "DNS", "Virtualization", "Security", "Phishing", "Other"
-3. confidence: Float 0.0 to 1.0
-4. system_name: The source system or application name (e.g. "Syncovery v11.3.1", "Zabbix", "Veeam")
-5. source_host: The hostname or IP where the alert originated
-6. main_message: One concise sentence (WHAT failed + WHY)
-7. details: A list of short strings, each a key fact bullet point
-8. recommended_actions: 1-2 specific, actionable steps
+3. status: Either "FIRING" (a new issue/error), "RESOLVED" (issue has recovered/fixed) or "INFO"
+4. action: MUST be one of "NEW", "RESOLVE", or "UPDATE" based on the ACTIVE incidents list.
+5. target_incident_id: The UUID of the matched active incident (if action is RESOLVE or UPDATE). Otherwise empty string.
+6. confidence: Float 0.0 to 1.0
+7. system_name: The source system or application name (e.g. "Syncovery v11.3.1", "Zabbix", "Veeam")
+8. source_host: The hostname or IP where the alert originated
+9. target_resource: The specific broken component, pipeline name, VM name, or alert rule (e.g., "example_daily_pipeline", "EXAMPLE-DB-SRV"). Must be specific to differentiate from other unrelated alerts.
+10. main_message: One concise sentence (WHAT failed + WHY)
+11. details: A list of short strings, each a key fact bullet point
+12. recommended_actions: 1-2 specific, actionable steps
+13. emoji: A single expressive emoji representing the state (e.g. ✅ for Up/Resolved, 🔴 for Critical Down, ⚠️ for Warning, ℹ️ for Info).
 
 Respond in JSON format ONLY:
-{
-    "analysis": {
+{{
+    "analysis": {{
         "severity": "...",
         "category": "...",
+        "status": "FIRING",
+        "action": "NEW",
+        "target_incident_id": "",
         "confidence": 0.0,
         "system_name": "...",
         "source_host": "...",
+        "target_resource": "...",
         "main_message": "...",
         "details": ["fact 1", "fact 2", "fact 3"],
-        "recommended_actions": ["specific action 1"]
-    }
-}
+        "recommended_actions": ["specific action 1"],
+        "emoji": "🔴"
+    }}
+}}
 
 Example input (Syncovery backup failure):
 Subject: Syncovery Report - INCOMPLETE
-Body: Profile OP-DB-PG03-SRV ... 9 copied of 12 ... Errors with 3 File(s) ... permission denied ...
+Body: Profile EXAMPLE-DB-SRV ... 9 copied of 12 ... Errors with 3 File(s) ... permission denied ...
 
 Example output:
-{
-    "analysis": {
+{{
+    "analysis": {{
         "severity": "Medium",
         "category": "Backup",
+        "status": "FIRING",
         "confidence": 0.95,
         "system_name": "Syncovery v11.3.1",
-        "source_host": "mail.local",
-        "main_message": "Backup profile OP-DB-PG03-SRV incomplete: 3/12 files failed with permission denied on SFTP source.",
+        "source_host": "EXAMPLE-SYNC-SRV",
+        "target_resource": "EXAMPLE-DB-SRV",
+        "main_message": "Backup profile EXAMPLE-DB-SRV incomplete: 3/12 files failed with permission denied on SFTP source.",
         "details": [
-            "Source: sftp://10.20.41.23/var/backups/postgres/jira/",
+            "Source: sftp://192.0.2.10/var/backups/postgres/jira/",
             "Failed: confluence, jira, postgres dumps (2026-02-08)",
-            "Dest: \\\\172.17.44.200\\DB-Backups\\OP-DB-PSG03-SRV",
+            "Dest: \\\\192.0.2.20\\DB-Backups\\EXAMPLE-DB-SRV",
             "Copied: 9 files (621.7MB) in 1m32s"
         ],
         "recommended_actions": [
-            "Fix read permissions on 10.20.41.23:/var/backups/postgres/jira/ for the SFTP backup user"
-        ]
-    }
-}"""
+            "Fix read permissions on 192.0.2.10:/var/backups/postgres/jira/ for the SFTP backup user"
+        ],
+        "emoji": "⚠️"
+    }}
+}}"""
 
 
 def get_provider_by_id(provider_id: str):
@@ -155,23 +202,23 @@ def get_provider_by_id(provider_id: str):
     return None
 
 
-def analyze_email(sender: str, subject: str, body: str, provider_id: str = None) -> tuple:
+def analyze_email(sender: str, subject: str, body: str, provider_id: str = None, active_incidents_context: str = "") -> tuple:
     """
     Analyze email using dynamic AI provider (Ollama, OpenAI, or custom).
     Returns (analysis_dict, provider_name, duration_seconds) or (None, provider_name, duration_seconds) if failed.
     """
     start_time = _time.time()
     provider_name = "unknown"
-    
+
     try:
         # Get provider dynamically
         provider = None
         if provider_id:
             provider = get_provider_by_id(provider_id)
-        
+
         if not provider:
             provider = get_default_provider()
-            
+
         base_url = provider["base_url"]
         model = provider["model"]
         api_key = provider.get("api_key", "")
@@ -182,7 +229,7 @@ def analyze_email(sender: str, subject: str, body: str, provider_id: str = None)
         # Fix OpenAI/Compatible URL
         if provider_type == "openai" and not base_url.endswith("/chat/completions"):
             base_url = f"{base_url.rstrip('/')}/chat/completions"
-        
+
         user_content = f"""
 Analyze this alert email:
 
@@ -190,65 +237,70 @@ FROM: {sender}
 SUBJECT: {subject}
 
 BODY:
-{body[:4000]}  
+{body[:4000]}
 """
-        
+
         payload = {
             "model": model,
             "messages": [
-                {"role": "system", "content": build_system_prompt()},
+                {"role": "system", "content": build_system_prompt(active_incidents_context)},
                 {"role": "user", "content": user_content}
             ],
             "temperature": 0.1
         }
-        
+
         headers = {"Content-Type": "application/json"}
-        
+
         # Add API key for OpenAI or other providers that need it
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        
+
         logger.info(f"⏳ AI analysis started | Provider: {provider_name}")
-        
+
         response = requests.post(
             base_url,
             json=payload,
             headers=headers,
             timeout=timeout
         )
-        
+
         duration = round(_time.time() - start_time, 1)
-        
+
         if response.status_code != 200:
             logger.error(f"❌ AI API error ({duration}s): {response.status_code} - {response.text}")
             return None, provider_name, duration
-        
+
         result = response.json()
         logger.debug(f"AI raw response: {result}")
-        
+
         # Extract content from OpenAI-compatible response
         choices = result.get("choices", [])
         if not choices:
             logger.error(f"❌ No choices in AI response ({duration}s)")
             return None, provider_name, duration
-        
+
         content = choices[0].get("message", {}).get("content", "")
         if not content:
             logger.error(f"❌ Empty content in AI response ({duration}s)")
             return None, provider_name, duration
-        
-        # Try to parse JSON from content
-        # Sometimes content might have markdown code blocks
-        if content.startswith("```"):
-            # Remove markdown code blocks
-            lines = content.split("\n")
-            content = "\n".join(lines[1:-1]) if len(lines) > 2 else content
-        
+
+        import re
+        # Try to extract JSON block using regex if there's markdown
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
+        if json_match:
+            content = json_match.group(1)
+        else:
+            # Fallback: try to find the first { and last }
+            start_idx = content.find('{')
+            end_idx = content.rfind('}')
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                content = content[start_idx:end_idx+1]
+
         parsed = json.loads(content)
         severity = parsed.get('analysis', {}).get('severity', 'Unknown')
         logger.info(f"✅ AI analysis complete | {duration}s | Provider: {provider_name} | Severity: {severity}")
         return parsed, provider_name, duration
-    
+
     except json.JSONDecodeError as e:
         duration = round(_time.time() - start_time, 1)
         logger.error(f"❌ AI JSON parse failed ({duration}s): {e}")
@@ -267,7 +319,7 @@ def escape_markdown_v2(text: str) -> str:
     """Escape special characters for Telegram MarkdownV2."""
     if not text:
         return ""
-    
+
     # Ensure text is string
     if not isinstance(text, str):
         try:
@@ -287,9 +339,9 @@ def format_alert(ai_result: dict, sender: str, subject: str, body: str = None) -
     """
     if not ai_result:
         return format_alert_fallback(sender, subject, body)
-    
+
     analysis = ai_result.get("analysis", {})
-    
+
     severity = analysis.get("severity", "Unknown")
     category = analysis.get("category", "Unknown")
     system_name = analysis.get("system_name", "Unknown")
@@ -298,32 +350,34 @@ def format_alert(ai_result: dict, sender: str, subject: str, body: str = None) -
     details = analysis.get("details", [])
     confidence = analysis.get("confidence", 0)
     actions = analysis.get("recommended_actions", [])
-    
-    # Severity emoji
-    severity_emoji = {
-        "Critical": "🔴",
-        "High": "🟠",
-        "Medium": "🟡",
-        "Low": "🟢",
-        "Info": "ℹ️"
-    }.get(severity, "⚪")
-    
+
+    # Get dynamic emoji directly from AI, fallback to severity-based if missing
+    dynamic_emoji = analysis.get("emoji", "")
+    if not dynamic_emoji:
+        dynamic_emoji = {
+            "Critical": "🔴",
+            "High": "🟠",
+            "Medium": "🟡",
+            "Low": "🟢",
+            "Info": "ℹ️"
+        }.get(severity, "⚪")
+
     # Build message
     lines = []
-    
+
     # Header: 🟡 Medium | Backup
-    lines.append(f"{severity_emoji} *{escape_markdown_v2(severity)}* \\| {escape_markdown_v2(category)}")
-    
-    # System + Host: 📌 Syncovery v11.3.1 — OP-SYNC-SRV
+    lines.append(f"{dynamic_emoji} *{escape_markdown_v2(severity)}* \\| {escape_markdown_v2(category)}")
+
+    # System + Host: 📌 Syncovery v11.3.1 — EXAMPLE-SYNC-SRV
     header_line = system_name
     if source_host:
         header_line = f"{system_name} — {source_host}"
     lines.append(f"📌 *{escape_markdown_v2(header_line)}*")
     lines.append("")
-    
+
     # Main message
     lines.append(escape_markdown_v2(main_message))
-    
+
     if MESSAGE_VERBOSITY in ["standard", "debug"]:
         # Details as structured bullet points
         if details:
@@ -336,19 +390,19 @@ def format_alert(ai_result: dict, sender: str, subject: str, body: str = None) -
                 lines.append(f"📋 {escape_markdown_v2(details)}")
             else:
                 lines.append(f"📋 {escape_markdown_v2(str(details))}")
-        
+
         # Actions (1-2 specific)
         if actions and len(actions) > 0:
             lines.append("")
             lines.append("*Action:*")
             for action in actions[:2]:
                 lines.append(f"→ {escape_markdown_v2(str(action))}")
-    
+
     if MESSAGE_VERBOSITY == "debug":
         lines.append("")
         lines.append(f"_Confidence: {confidence:.0%}_")
         lines.append(f"_From: {escape_markdown_v2(sender)}_")
-    
+
     return "\n".join(lines)
 
 
@@ -360,12 +414,12 @@ def format_alert_fallback(sender: str, subject: str, body: str = None) -> str:
         f"*Subject:* {escape_markdown_v2(subject)}",
         f"*From:* {escape_markdown_v2(sender)}",
     ]
-    
+
     if body:
         preview = body[:200] + "..." if len(body) > 200 else body
         lines.append("")
         lines.append(escape_markdown_v2(preview))
-    
+
     return "\n".join(lines)
 
 
@@ -373,9 +427,9 @@ def format_for_matrix(ai_result: dict, sender: str, subject: str, body: str = No
     """Format alert for Matrix (plain text)."""
     if not ai_result:
         return f"⚠️ Alert\n\nSubject: {subject}\nFrom: {sender}\n\n{body[:500] if body else ''}"
-    
+
     analysis = ai_result.get("analysis", {})
-    
+
     severity = analysis.get("severity", "Unknown")
     category = analysis.get("category", "Unknown")
     system_name = analysis.get("system_name", "Unknown")
@@ -383,7 +437,7 @@ def format_for_matrix(ai_result: dict, sender: str, subject: str, body: str = No
     main_message = analysis.get("main_message", subject)
     details = analysis.get("details", [])
     actions = analysis.get("recommended_actions", [])
-    
+
     severity_emoji = {
         "Critical": "🔴",
         "High": "🟠",
@@ -391,19 +445,19 @@ def format_for_matrix(ai_result: dict, sender: str, subject: str, body: str = No
         "Low": "🟢",
         "Info": "ℹ️"
     }.get(severity, "⚪")
-    
+
     # Header
     header_line = system_name
     if source_host:
         header_line = f"{system_name} — {source_host}"
-    
+
     lines = [
         f"{severity_emoji} {severity} | {category}",
         f"📌 {header_line}",
         "",
         main_message,
     ]
-    
+
     # Details as bullet points
     if details:
         lines.append("")
@@ -414,12 +468,12 @@ def format_for_matrix(ai_result: dict, sender: str, subject: str, body: str = No
             lines.append(f"📋 {details}")
         else:
             lines.append(f"📋 {str(details)}")
-    
+
     # Actions
     if actions and len(actions) > 0:
         lines.append("")
         lines.append("Action:")
         for action in actions[:2]:
             lines.append(f"→ {str(action)}")
-    
+
     return "\n".join(lines)

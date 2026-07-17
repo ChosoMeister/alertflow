@@ -1,16 +1,17 @@
 """
-Sentinel-AI-Core API Server - Main Application
+AlertFlow API Server - Main Application
 """
 import logging
 import os
 from datetime import timedelta
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 
 from auth import authenticate_user, create_access_token, get_current_user, User
 from config import get_settings
-from routes import routing, test_email, alerts, health, logs, integrations, providers, channels
+from routes import routing, test_email, alerts, health, logs, integrations, providers, channels, sse, analytics, webhook
 from routes import settings as settings_routes
 
 # Configure logging
@@ -22,11 +23,22 @@ logger = logging.getLogger("API-Server")
 
 settings = get_settings()
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan: startup and shutdown events."""
+    logger.info("AlertFlow API Server starting...")
+    logger.info(f"API running on {settings.api_host}:{settings.api_port}")
+    yield
+    logger.info("AlertFlow API Server shutting down...")
+
+
 # Create FastAPI app
 app = FastAPI(
-    title="Sentinel-AI-Core API",
+    title="AlertFlow API",
     description="Alert processing system with AI analysis and notification routing",
-    version="2.0.0",
+    version="2.1.0",
+    lifespan=lifespan,
 )
 
 # CORS middleware
@@ -48,6 +60,9 @@ app.include_router(logs.router, prefix="/api")
 app.include_router(integrations.router, prefix="/api")
 app.include_router(providers.router, prefix="/api")
 app.include_router(channels.router, prefix="/api")
+app.include_router(sse.router, prefix="/api")
+app.include_router(analytics.router, prefix="/api")
+app.include_router(webhook.router, prefix="/api")
 app.include_router(settings_routes.router)  # settings has its own prefix
 
 
@@ -61,14 +76,14 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     access_token = create_access_token(
         data={"sub": user["username"], "role": user["role"]},
         expires_delta=timedelta(minutes=settings.jwt_expire_minutes)
     )
-    
+
     logger.info(f"User logged in: {user['username']}")
-    
+
     return {
         "access_token": access_token,
         "token_type": "bearer",
@@ -86,17 +101,6 @@ async def get_current_user_info(user: User = Depends(get_current_user)):
         "username": user.username,
         "role": user.role
     }
-
-
-@app.on_event("startup")
-async def startup_event():
-    logger.info("Sentinel-AI-Core API Server starting...")
-    logger.info(f"API running on {settings.api_host}:{settings.api_port}")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    logger.info("Sentinel-AI-Core API Server shutting down...")
 
 
 if __name__ == "__main__":

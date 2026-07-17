@@ -2,7 +2,8 @@
 Health and Status API - System health checks.
 """
 import os
-import requests
+import time
+import httpx
 from fastapi import APIRouter, Depends
 
 from auth import User, get_current_user
@@ -11,26 +12,38 @@ from models import SystemStatus, QueueMetrics
 
 router = APIRouter(tags=["health"])
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1/chat/completions")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434/v1/chat/completions")
+
+# Ollama health cache (avoid blocking calls on every poll)
+_ollama_health_cache = {"status": "unknown", "checked_at": 0}
+_OLLAMA_CACHE_TTL = 60  # seconds
 
 
-def check_ollama_health() -> str:
-    """Check if Ollama API is reachable (lightweight ping)."""
+async def check_ollama_health() -> str:
+    """Check if Ollama API is reachable (async, cached)."""
+    global _ollama_health_cache
+
+    now = time.time()
+    if now - _ollama_health_cache["checked_at"] < _OLLAMA_CACHE_TTL:
+        return _ollama_health_cache["status"]
+
     try:
-        response = requests.post(
-            OLLAMA_BASE_URL,
-            json={
-                "model": os.getenv("OLLAMA_MODEL", "gpt-oss:120b"),
-                "messages": [{"role": "user", "content": "hi"}],
-                "max_tokens": 1
-            },
-            headers={"Content-Type": "application/json"},
-            timeout=120
-        )
-        return "online" if response.status_code == 200 else "offline"
-    except:
-        return "offline"
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                OLLAMA_BASE_URL,
+                json={
+                    "model": os.getenv("OLLAMA_MODEL", "gpt-oss:120b"),
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 1
+                },
+                headers={"Content-Type": "application/json"},
+            )
+            status = "online" if response.status_code == 200 else "offline"
+    except Exception:
+        status = "offline"
 
+    _ollama_health_cache = {"status": status, "checked_at": now}
+    return status
 
 
 @router.get("/health")
@@ -38,7 +51,7 @@ async def health_check():
     """Basic health check (no auth required)."""
     redis_svc = get_redis_service()
     redis_ok = redis_svc.ping()
-    
+
     return {
         "status": "healthy" if redis_ok else "degraded",
         "redis": "connected" if redis_ok else "disconnected"
@@ -49,12 +62,14 @@ async def health_check():
 async def get_system_status(user: User = Depends(get_current_user)):
     """Get status of all system components."""
     redis_svc = get_redis_service()
-    
+
+    ollama_status = await check_ollama_health()
+
     return SystemStatus(
         smtp_ingestor=redis_svc.check_service_health("smtp-ingestor"),
         redis="online" if redis_svc.ping() else "offline",
         alert_processor=redis_svc.check_service_health("alert-processor"),
-        ollama=check_ollama_health()
+        ollama=ollama_status
     )
 
 
@@ -63,7 +78,7 @@ async def get_queue_metrics(user: User = Depends(get_current_user)):
     """Get queue depth and processing metrics."""
     redis_svc = get_redis_service()
     metrics = redis_svc.get_metrics()
-    
+
     return {
         "queue_depth": redis_svc.get_queue_depth(),
         "dlq_depth": redis_svc.get_dlq_depth(),

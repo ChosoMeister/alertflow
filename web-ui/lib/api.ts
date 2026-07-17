@@ -1,5 +1,5 @@
 /**
- * API Client for Sentinel-AI-Core
+ * API Client for AlertFlow
  */
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -30,9 +30,9 @@ async function apiRequest(endpoint: string, options: ApiOptions = {}) {
     // Handle expired/invalid token — auto-redirect to login
     if (response.status === 401) {
         if (typeof window !== 'undefined') {
-            localStorage.removeItem('sentinel_token');
-            localStorage.removeItem('sentinel_user');
-            window.location.href = '/login';
+            localStorage.removeItem('alertflow_token');
+            localStorage.removeItem('alertflow_user');
+            window.location.href = '/en/login';
         }
         throw new Error('Session expired');
     }
@@ -69,12 +69,13 @@ export const api = {
     metrics: (token: string) => apiRequest('/metrics', { token }),
 
     // Alerts
-    alerts: (token: string, params?: { limit?: number; offset?: number; status?: string; severity?: string }) => {
+    alerts: (token: string, params?: { limit?: number; offset?: number; status?: string; severity?: string; q?: string }) => {
         const query = new URLSearchParams();
         if (params?.limit) query.set('limit', params.limit.toString());
         if (params?.offset) query.set('offset', params.offset.toString());
         if (params?.status) query.set('status', params.status);
         if (params?.severity) query.set('severity', params.severity);
+        if (params?.q) query.set('q', params.q);
         return apiRequest(`/alerts?${query}`, { token });
     },
     alert: (token: string, id: string) => apiRequest(`/alerts/${id}`, { token }),
@@ -82,6 +83,7 @@ export const api = {
         apiRequest(`/alerts/${id}/status?status=${status}`, { method: 'PATCH', token }),
     rerunAI: (token: string, id: string) => apiRequest(`/alerts/${id}/rerun-ai`, { method: 'POST', token }),
     resendAlert: (token: string, id: string) => apiRequest(`/alerts/${id}/resend`, { method: 'POST', token }),
+    forceSummary: (token: string) => apiRequest('/alerts/force-summary', { method: 'POST', token }),
 
     // Routing Rules
     routingRules: (token: string) => apiRequest('/routing-rules', { token }),
@@ -142,10 +144,16 @@ export const api = {
     adminChangePassword: (token: string, username: string, newPassword: string) =>
         apiRequest(`/settings/users/${username}/password`, { method: 'PUT', body: { new_password: newPassword }, token }),
     listUsers: (token: string) => apiRequest('/settings/users', { token }),
+    getGeneralSettings: (token: string) => apiRequest('/settings/general', { token }),
+    updateGeneralSettings: (token: string, settings: any) =>
+        apiRequest('/settings/general', { method: 'PUT', body: settings, token }),
 
     // Queue Monitoring
     queueDlq: (token: string, limit: number = 50) => apiRequest(`/queue/dlq?limit=${limit}`, { token }),
     queueRetry: (token: string, limit: number = 50) => apiRequest(`/queue/retry?limit=${limit}`, { token }),
     queueFlushDlq: (token: string) => apiRequest('/queue/dlq/flush', { method: 'POST', token }),
     queueRequeueDlq: (token: string, index: number) => apiRequest(`/queue/dlq/${index}/requeue`, { method: 'POST', token }),
+
+    // Analytics
+    analytics: (token: string) => apiRequest('/analytics', { token }),
 };

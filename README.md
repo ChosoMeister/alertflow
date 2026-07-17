@@ -1,178 +1,221 @@
-# 🛡️ AlertFlow
+# AlertFlow
 
-[Persian Documentation / مستندات فارسی](#-مستندات-فارسی)
+### Turn noisy infrastructure alerts into clear, correlated, actionable incidents.
 
-> An intelligent, AI-powered email alert processor, analyzer, and multi-channel notification dispatcher.
+[![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=flat&logo=fastapi)](https://fastapi.tiangolo.com/)
+[![Next.js](https://img.shields.io/badge/Next.js-000000?style=flat&logo=nextdotjs&logoColor=white)](https://nextjs.org/)
+[![Redis](https://img.shields.io/badge/Redis-DC382D?style=flat&logo=redis&logoColor=white)](https://redis.io/)
+[![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat&logo=docker&logoColor=white)](https://www.docker.com/)
 
-### 📸 Dashboard Snapshots
-<p align="center">
-  <img src="./docs/demo_dashboard.png" width="800" alt="Dashboard Overview">
-  <br>
-  <img src="./docs/demo_alerts.png" width="800" alt="Alert Details">
-  <br>
-  <img src="./docs/demo_rules.png" width="800" alt="Routing Rules UI">
-</p>
+AlertFlow is an open-source, AI-powered alert intelligence and incident-routing platform. It sits between monitoring systems and operations teams, converts raw email or webhook events into structured incidents, correlates related alerts, suppresses duplicates, and delivers the right context to the right channel.
 
-AlertFlow acts as a smart middleware between your infrastructure monitoring tools (e.g., Zabbix, Prometheus, Grafana, Backup tools, Cronjobs) and your team's communication channels (Telegram, Matrix, Webhooks, SMS). 
+Instead of asking on-call engineers to interpret hundreds of repetitive messages, AlertFlow gives them a concise summary, severity, affected resource, recommended actions, incident history, and current state—while preserving the option to run the AI layer on your own infrastructure.
 
-Instead of overwhelming your team with raw, noisy, and unstructured emails, Sentinel ingests email alerts via its built-in SMTP server, processes them using Large Language Models (LLMs) to extract structured insights (Severity, Category, System Name, Actionable Summary), and dynamically routes them to the correct channels based on customizable rules.
+## Why AlertFlow?
 
----
+Monitoring tools are excellent at detecting symptoms. They are less effective at explaining what happened, connecting related events, or deciding who should be notified. The result is alert fatigue, fragmented incident context, repeated notifications, and slower response times.
 
-## ✨ Core Features
+AlertFlow transforms that workflow:
 
-- 📧 **Built-in SMTP Ingestor:** A lightweight, asynchronous Python SMTP server that acts as a drop-in replacement for traditional mail transfer agents (like Postfix). It actively listens on port 25, parses incoming emails, and queues them in Redis.
-- 🧠 **AI-Powered Log/Alert Analysis:** Connects to any OpenAI-compatible API or local LLM instances (like **Ollama**) to read messy logs/emails and extract structured JSON data, highlighting the core issue, severity, and context.
-- 🔀 **Advanced Intelligent Routing:** Create dynamic rules based on Glob patterns (e.g., `*@db-servers.local` or `security-*@domain.com`). Map specific email addresses to specific channels (e.g., DB alerts to Telegram Thread A, Security to Matrix Room B).
-- 🚨 **Severity-Based Overrides:** If the AI determines an alert is `CRITICAL`, Sentinel can override the standard routing rule and broadcast the alert to high-priority channels (like SMS) automatically.
-- 📢 **Multi-Channel Dispatching:** Built-in seamless support for sending styled and formatted messages to **Telegram**, **Matrix**, generic **Webhooks**, and **SMS** providers.
-- ♻️ **Enterprise Resiliency:** Built on Redis with advanced queue mechanics. Features an exponential backoff **Retry Queue** for failed dispatches, and a **Dead Letter Queue (DLQ)** for permanently failed messages. No alert is ever lost.
-- 🛡️ **Mute & Filtering System:** Ability to mute noisy senders or domains entirely, dropping their alerts before they consume AI resources.
-- 💻 **Modern Web Console (Dashboard):** A completely decoupled, beautiful **Next.js & TailwindCSS** UI for monitoring queue depths, viewing AI analysis results, configuring routing rules, and managing AI providers on the fly.
+- Ingest alerts through SMTP or a secured HTTP webhook.
+- Analyze unstructured content with any OpenAI-compatible model or local Ollama deployment.
+- Correlate related events into a single evolving incident.
+- Detect resolved states and update existing notifications automatically.
+- Route incidents by sender, recipient, severity, channel, or custom rules.
+- Track operational trends from a real-time multilingual dashboard.
 
----
+## Product highlights
 
-## 🏗️ Architecture & Data Flow
+### AI incident intelligence
 
-AlertFlow uses a heavily decoupled, microservices-oriented architecture orchestrated by Docker Compose:
+- Extracts severity, category, source host, affected resource, concise explanation, and recommended actions.
+- Supports OpenAI-compatible APIs and self-hosted Ollama models.
+- Uses fallback processing so an AI outage does not silently discard an alert.
+- Reprocesses failed analyses and updates the existing notification after recovery.
 
-1. **Generation:** Your infrastructure sends an email alert exactly as it normally would.
-2. **Ingestion (`smtp-ingestor`):** Receives the email, strips attachments, extracts Text and HTML bodies, and pushes an `AlertPayload` to the Redis `alert_queue`.
-3. **Processing (`alert-processor`):** A daemon continuously polls Redis. Once an alert is fetched:
-   - **Mute Check:** Is the sender muted? If yes, discard.
-   - **AI Analysis:** Sends the raw email body to the active AI Provider with a strict system prompt to return a structured JSON evaluation.
-   - **Rule Evaluation:** Checks Redis for routing rules matching the `From` or `To` address.
-   - **Dispatch:** Formats the AI's summary into a beautiful message and makes API calls to Telegram/Matrix/etc.
-   - **Error Handling:** If sending fails, it moves the message to a sorted set `retry_queue`. If max retries are exceeded, it goes to `DLQ`.
-4. **Management (`api-server` & `web-ui`):** Provides a RESTful API and a visual interface to monitor the system heartbeat, edit rules, and view the raw logs/alerts saved in Redis.
+### Intelligent correlation and noise reduction
 
-## 🛠️ Technology Stack
+- Groups repeated and related alerts into a single incident timeline.
+- Suppresses duplicates while retaining occurrence counts and context.
+- Recognizes recovery messages and automatically resolves matching incidents.
+- Maintains action history for acknowledged, resolved, resent, and system-resolved events.
 
-- **Backend:** Python 3.11, FastAPI (for API), aiosmtpd (for SMTP)
-- **Database / Message Broker:** Redis 7 (Storage, Pub/Sub, Queues, Hashes, Sorted Sets)
-- **Frontend / UI:** Next.js 14, React, TailwindCSS, shadcn/ui
-- **AI Integration:** Support for Ollama, OpenAI, or any OpenAI-compatible endpoint.
-- **Containerization:** Docker & Docker Compose
+### Flexible routing and delivery
 
----
+- Glob-based routing for sender and recipient addresses.
+- Severity-specific overrides for critical escalation paths.
+- Telegram, Matrix, generic webhook, and Kavenegar SMS delivery.
+- Telegram topic/thread support, optional proxy mode, and message editing.
+- Retry queues with exponential backoff and a dead-letter queue for failed deliveries.
+- Scheduled Telegram summaries with configurable bot, chat, thread, time, and timezone.
 
-## 🚀 Quick Start Guide
+### Operations-ready dashboard
 
-### 1. Prerequisites
-- Docker and Docker Compose (v2) installed.
-- (Optional but recommended) A running instance of Ollama setup with a model like `llama3` or `gpt-oss`.
+- Live updates through Server-Sent Events without manual refreshes.
+- Alert search, quick filters, status management, resend, and AI rerun controls.
+- Analytics by status, severity, source, sender, and resolution state.
+- Queue monitoring, application logs, provider health, routing previews, and test-email tools.
+- Full English and Persian interface with locale-aware navigation.
 
-### 2. Installation
+### Security and deployment
+
+- Password-protected Redis and configurable CORS policy.
+- JWT authentication with bcrypt password hashing and legacy-hash migration.
+- Token-protected webhook receiver with request-size limits.
+- SMTP authentication and STARTTLS configuration.
+- Docker Compose deployment using public base images and environment-driven configuration.
+
+## See it in action
+
+![AlertFlow dashboard](docs/demo_dashboard.png)
+
+| Alert operations | Routing rules |
+| --- | --- |
+| ![AlertFlow alerts](docs/demo_alerts.png) | ![AlertFlow routing rules](docs/demo_rules.png) |
+
+## Architecture
+
+```text
+ Monitoring systems                 External applications
+ (Zabbix, Grafana, jobs)            (custom tools and services)
+           │ SMTP                              │ HTTP webhook
+           └──────────────┬────────────────────┘
+                          ▼
+                 Ingestion and validation
+                          │
+                          ▼
+                   Redis message layer
+                    ┌─────┴─────┐
+                    ▼           ▼
+             Alert processor   FastAPI
+             AI + correlation  REST + SSE
+                    │           │
+                    ├─────┬─────┘
+                    ▼     ▼
+           Notification  Next.js dashboard
+           channels
+```
+
+The project is composed of four independently deployable services:
+
+| Service | Responsibility |
+| --- | --- |
+| `smtp-ingestor` | Receives email alerts and safely queues normalized messages. |
+| `alert-processor` | Runs AI analysis, correlation, deduplication, state detection, and dispatch. |
+| `api-server` | Exposes authenticated REST, webhook, analytics, health, and SSE endpoints. |
+| `web-ui` | Provides the English/Persian operations and administration dashboard. |
+
+Redis provides queues, retry state, incident data, configuration, logs, analytics counters, and real-time event coordination.
+
+## Quick start
+
+### Requirements
+
+- Docker Engine with Docker Compose
+- An OpenAI-compatible inference endpoint or Ollama instance
+- At least one notification channel if you want external delivery
+
+### 1. Clone and configure
+
 ```bash
 git clone https://github.com/ChosoMeister/alertflow.git
 cd alertflow
-
-# Copy the environment template
 cp .env.example .env
 ```
 
-### 3. Configuration
-Edit the `.env` file to match your environment. Key variables:
-- `JWT_SECRET`: Generate a secure random string for dashboard authentication.
-- `OLLAMA_BASE_URL`: Pointer to your AI API (e.g., `http://localhost:11434/v1/chat/completions`).
-- *(Optional)* Add default bot tokens for Telegram or Matrix if you don't plan to configure them via the UI.
+Before starting, replace every `change_this_...` value in `.env`. At minimum, configure:
 
-### 4. Deployment
-```bash
-docker-compose up -d --build
-```
-This will spin up:
-- **Redis:** (Internal)
-- **SMTP Ingestor:** `0.0.0.0:25`
-- **Alert Processor:** Background worker
-- **API Server:** `http://localhost:8000`
-- **Web UI:** `http://localhost:3000`
-
-### 5. Accessing the Dashboard
-Go to [http://localhost:3000](http://localhost:3000)
-- **Default Username:** `admin`
-- **Default Password:** `admin` (Change this immediately in settings!)
-
----
-
-## 📖 System Services Breakdown
-
-### `services/smtp-ingestor/`
-Uses `aiosmtpd` to handle SMTP traffic. It acts as an unauthenticated open relay designed specifically to be placed inside a secure internal network (VLAN) where monitoring tools can freely drop emails.
-
-### `services/alert-processor/`
-The core engine. Contains logic for:
-- `ai_service.py`: Crafting dynamic AI prompts and parsing JSON responses.
-- `routing.py`: Matching `fnmatch` glob patterns against email addresses to resolve the correct channel override.
-- `utils.py`: Contains API implementations for Webhooks, Matrix (Synapse), Telegram Bot API (with proxy support), and SMS.
-
-### `services/api-server/`
-FastAPI backend that interfaces with Redis. Handles JWT authentication, CRUD operations for settings, and provides metric aggregation for the frontend.
-
-### `web-ui/`
-Next.js application. Allows admins to visually track the state of the `alert_queue`, see AI breakdowns of recent alerts, and manage routing.
-
----
----
-
-<div dir="rtl" align="right">
-
-# 🇮🇷 مستندات فارسی (Persian Documentation)
-
-**سنتینل هوش‌مصنوعی (AlertFlow)** یک دستیار هوشمند و پردازشگر هشدار است که هشدارهای سنتی و پیچیده‌ی ایمیلی را دریافت کرده، با استفاده از موتورهای هوش مصنوعی تحلیل می‌کند و در نهایت خروجی ساختاریافته و تمیز را به پیام‌رسان‌های مختلف ارسال می‌کند.
-
-این سیستم اساساً یک لایه میانی (Middleware) بین ابزارهای مانیتورینگ شما (مانند زبیکس، پرومتئوس، بک‌آپ سرورها، و اسکریپت‌های کرون‌جاب) و تیم فنی شما (در تلگرام، ماتریکس یا SMS) است.
-
-### 🎯 هدف پروژه و نحوه عملکرد
-
-در محیط‌های سازمانی بزرگ، ابزارهای مختلف روزانه ده‌ها ایمیل هشدار ارسال می‌کنند که خواندن متن‌های طولانی آن‌ها خسته‌کننده است. عملکرد Sentinel به این شکل است:
-1. ایمیل به پورت 25 سرور Sentinel ارسال می‌شود.
-2. سرور `smtp-ingestor` ایمیل را دریافت کرده و به یک صف پیام در **Redis** می‌فرستد.
-3. سرویس `alert-processor` پیام را برداشته و متن آن را به یک مدل هوش مصنوعی (مانند Ollama یا ChatGPT) پاس می‌دهد.
-4. هوش مصنوعی متن باز و نامرتب را می‌خواند و به صورت هوشمند **شدت مشکل (Severity)**، **دسته‌بندی**، **نام سیستم درگیر** و **یک خلاصه‌ی کوتاه برای حل مشکل** را به صورت JSON برمی‌گرداند.
-5. سیستم بر اساس یک سری متغیر از پیش تعیین شده (Routing Rules) تصمیم می‌گیرد این خطا به کدام گروه تلگرامی، کدام چت ماتریکس یا کدام شماره پیامک شود.
-6. در نهایت پیام به شکلی بسیار خوانا، همراه با ایموجی و اولویت‌بندی شده برای تیم فنی ارسال می‌شود.
-
-### ✨ امکانات و فیچرهای کلیدی
-
-- **دریافت‌کننده اختصاصی SMTP:** نیازی به نصب Postfix یا Exim ندارید. این برنامه خودش مستقیماً نقش یک سرور ایمیل گیرنده را بازی می‌کند.
-- **تحلیل با مدل‌های زبانی (LLM):** درک کامل متن خطاهای سیستمی و ترجمه‌ی آن‌ها به زبان ساده یا دیتای ساختاریافته به کمک هوش مصنوعی.
-- **مسیریابی هوشمند (Smart Routing):** می‌توانید تعریف کنید که اگر خطایی از `*@db.local` آمد برود به گروه دیتابیس کاران در تلگرام و اگر از `network-*@op.local` آمد برود به چت ادمین‌های شبکه.
-- **پشتیبانی از Override بر اساس شدت بحران:** قابلیتی که اگر هوش مصنوعی تشخیص داد پیام حاوی قطعی کامل سیستم (Critical) است، قوانین عادی را بشکند و به جای تلگرام، مستقیم به مدیران پیامک (SMS) بزند.
-- **ارسال چند‌کاناله (Multi-Channel):** پشتیبانی نیتیو از Telegram (با قابلیت تنظیم پراکسی برای ایران)، Matrix، Webhook و پنل‌های پیامکی.
-- **سیستم Retry و DLQ:** اگر سرور تلگرام قطع باشد، پیام گم نمی‌شود! سیستم با زمان‌بندی مکث صعودی (Exponential Backoff) مجددا تلاش می‌کند و اگر کلاً ناموفق بود، پیام را به صندوق Dead Letter Queue می‌فرستد تا مدیر سرور به صورت دستی رسیدگی کند.
-- **داشبورد گرافیکی و مدرن:** پنل مدیریتی ایجاد شده با Next.js برای بررسی وضعیت لحظه‌ای صف‌ها، ویرایش Ruleها، اضافه کردن پرووایدرهای جدید AI و مشاهده لاگ‌ها در محیطی بسیار تمیز.
-
-### 🏛️ اجزای تشکیل دهنده (معماری)
-پروژه از میکروسرویس‌های زیر که توسط داکر کامپوز مدیریت می‌شوند تشکیل شده است:
-- `redis`: به عنوان قلب تپنده‌ی پروژه، صف پیام‌ها و پایگاه داده سیستم.
-- `smtp-ingestor`: با زبان Python و ماژول `aiosmtpd` ساخته شده.
-- `alert-processor`: پردازشگر اصلی بک‌گراند با قابلیت پارس کردن لاگ‌ها و ارتباط با AI.
-- `api-server`: پیاده‌سازی شده با FastAPI برای سرویس‌دهی API به داشبورد.
-- `web-ui`: داشبورد کاربری مدرن با Next.js و TailwindCSS.
-
-### 🚀 راهنمای راه‌اندازی سریع
-
-۱. ابتدا ریپازیتوری را کلون کنید:
-```bash
-git clone https://github.com/ChosoMeister/alertflow.git
-cd alertflow
+```env
+REDIS_PASSWORD=use-a-long-random-password
+JWT_SECRET=use-another-long-random-secret
+WEBHOOK_AUTH_TOKEN=use-a-separate-random-token
+OLLAMA_BASE_URL=http://host.docker.internal:11434/v1/chat/completions
+OLLAMA_MODEL=your-model-name
+CORS_ORIGINS=http://localhost:3000
 ```
 
-۲. فایل پیکربندی (Environment Variables) را ایجاد و مقادیر دلخواه را وارد کنید:
-```bash
-cp .env.example .env
-```
-*(حتماً مقدار `JWT_SECRET` را در فایل تنظیم کنید و در صورت نیاز `OLLAMA_BASE_URL` را روی سرور ای‌آی خود تنظیم نمایید)*
+Generate secrets with a tool such as `openssl rand -hex 32`; do not reuse the example values in production.
 
-۳. داکر کامپوز را بیلد و ران کنید:
+### 2. Start AlertFlow
+
 ```bash
-docker-compose up -d --build
+docker compose up -d --build
 ```
 
-۴. دسترسی به سیستم:
-- داشبورد پنل مدیریتی روی پورت `3000` بالا می‌آید `http://localhost:3000`.
-- نام کاربری و رمز عبور پیش‌فرض: `admin / admin` (از داخل تنظیمات حتماً آن را تغییر دهید).
-- دریافت کننده‌ی ایمیل، روی پورت `25` سرور شما منتظر دریافت هشدارهای سیستم‌های مانیتورینگ خواهد بود.
+Open:
 
-</div>
+- Dashboard: [http://localhost:3000](http://localhost:3000)
+- API documentation: [http://localhost:8000/docs](http://localhost:8000/docs)
+- Health endpoint: [http://localhost:8000/api/health](http://localhost:8000/api/health)
+
+The initial local accounts are `admin/admin` and `operator/operator`. Change these passwords immediately from Settings before exposing the application to any network.
+
+### 3. Send alerts
+
+Point a monitoring tool at the SMTP listener on port `25`, or send a JSON payload to the webhook endpoint with your configured token:
+
+```bash
+curl -X POST http://localhost:8000/api/webhook/grafana \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Token: $WEBHOOK_AUTH_TOKEN" \
+  -d '{
+    "subject": "Database latency is above threshold",
+    "body": "p95 latency exceeded 800ms for five minutes",
+    "status": "firing"
+  }'
+```
+
+## Configuration
+
+The checked-in [.env.example](.env.example) documents the supported environment variables. Runtime settings for AI providers, notification channels, routing, severity overrides, daily summaries, and account passwords can also be managed from the dashboard.
+
+For public deployments, place the dashboard and API behind a TLS-terminating reverse proxy, restrict exposed ports, use strong unique secrets, and set an explicit `CORS_ORIGINS` value.
+
+## Development
+
+Run the Python services with their individual requirements files. For the web dashboard:
+
+```bash
+cd web-ui
+npm ci
+npm run dev
+```
+
+Production build:
+
+```bash
+npm run build
+```
+
+End-to-end tests are located in `web-ui/tests` and use Playwright:
+
+```bash
+npm run test:e2e
+```
+
+## فارسی
+
+### هشدار کمتر، درک بهتر، واکنش سریع‌تر
+
+AlertFlow یک پلتفرم متن‌باز برای تحلیل، همبستگی و مسیریابی هوشمند هشدارهای زیرساختی است. این محصول ایمیل‌ها و webhookهای خام ابزارهایی مانند Zabbix، Grafana، سامانه‌های پشتیبان‌گیری و jobهای زمان‌بندی‌شده را دریافت می‌کند و آن‌ها را به رخدادهایی قابل‌فهم و قابل‌پیگیری تبدیل می‌کند.
+
+با AlertFlow تیم عملیات به‌جای خواندن پیام‌های تکراری و طولانی، خلاصه مشکل، شدت رخداد، منبع، تجهیز یا سرویس درگیر، راهکارهای پیشنهادی و تاریخچه کامل وضعیت را در تلگرام، Matrix، webhook، پیامک یا داشبورد مشاهده می‌کند.
+
+قابلیت‌های کلیدی:
+
+- تحلیل هشدار با مدل‌های OpenAI-compatible یا Ollama داخلی
+- تجمیع هشدارهای مرتبط و جلوگیری از اعلان‌های تکراری
+- تشخیص پیام‌های بازیابی و بستن خودکار رخداد
+- مسیریابی بر اساس فرستنده، گیرنده، شدت و قوانین سفارشی
+- ارسال و ویرایش اعلان در Telegram، Matrix، webhook و SMS
+- صف retry، backoff تصاعدی و dead-letter queue
+- خلاصه روزانه قابل تنظیم در تلگرام
+- داشبورد زنده، گزارش‌های تحلیلی و تاریخچه اقدامات
+- رابط کاربری کامل فارسی و انگلیسی
+- دریافت هشدار از SMTP و webhook امن
+
+AlertFlow برای تیم‌هایی ساخته شده که کنترل داده، امکان اجرای داخلی، انعطاف در اتصال به ابزارهای موجود و کاهش واقعی alert fatigue برایشان مهم است.
+
+## Contributing
+
+Issues and pull requests are welcome. For substantial changes, open an issue first so the design and operational impact can be discussed.

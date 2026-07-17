@@ -8,7 +8,7 @@ from typing import Optional, List, Dict, Any
 def match_pattern(pattern: str, email: str) -> bool:
     """
     Match email against glob pattern (case-insensitive).
-    
+
     Supported patterns:
     - Exact: alert@system.local
     - Domain wildcard: *@domain.tld
@@ -26,25 +26,25 @@ def find_matching_rule(
 ) -> Optional[Dict[str, Any]]:
     """
     Find the first matching rule for an email, considering both FROM and TO rules.
-    
+
     Rules are evaluated in priority order (lower number = higher priority).
     For match_field="from" rules, matches against sender_email.
     For match_field="to" rules, matches against any recipient in recipient_emails.
     """
     if recipient_emails is None:
         recipient_emails = []
-    
+
     # Filter enabled rules, sort by priority
     filtered_rules = [
-        r for r in rules 
+        r for r in rules
         if str(r.get("enabled", "true")).lower() == "true"
     ]
     filtered_rules.sort(key=lambda r: int(r.get("priority", 0)))
-    
+
     for rule in filtered_rules:
         pattern = rule.get("email_pattern", "")
         match_field = rule.get("match_field", "from")
-        
+
         if match_field == "to":
             # Match against any recipient
             for recipient in recipient_emails:
@@ -54,7 +54,7 @@ def find_matching_rule(
             # match_field == "from" (default)
             if sender_email and match_pattern(pattern, sender_email):
                 return rule
-    
+
     return None
 
 
@@ -69,10 +69,10 @@ def get_routing_targets(
 ) -> Dict[str, Any]:
     """
     Get routing targets for an email.
-    
+
     Matches rules against both sender (match_field="from") and
     recipients (match_field="to") in priority order.
-    
+
     Returns dict with:
     - matched_rule: rule name or None
     - channel: "telegram", "matrix", "both", "dynamic"
@@ -83,7 +83,7 @@ def get_routing_targets(
     - matrix_room_id (legacy fallback)
     """
     matched_rule = find_matching_rule(sender_email, rules, recipient_emails or [])
-    
+
     if matched_rule:
         # Deserialize JSON fields if they are strings
         nc_ids = matched_rule.get("notification_channel_ids", [])

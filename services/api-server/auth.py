@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Optional
 import hashlib
+from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
@@ -14,6 +15,9 @@ settings = get_settings()
 # OAuth2 scheme
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
+# Password hashing (bcrypt)
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 
 class User(BaseModel):
     username: str
@@ -26,8 +30,13 @@ class TokenData(BaseModel):
 
 
 def hash_password(password: str) -> str:
-    """Simple SHA256 hash for demo purposes"""
-    return hashlib.sha256(password.encode()).hexdigest()
+    """Hash password with bcrypt."""
+    return pwd_context.hash(password)
+
+
+def _is_legacy_sha256(hashed: str) -> bool:
+    """Check if hash is old SHA-256 format (64 hex chars)."""
+    return len(hashed) == 64 and all(c in '0123456789abcdef' for c in hashed)
 
 
 # Default users (used if Redis has no users)
@@ -59,7 +68,10 @@ def init_default_users():
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return hash_password(plain_password) == hashed_password
+    """Verify password — supports bcrypt and legacy SHA-256 with auto-upgrade."""
+    if _is_legacy_sha256(hashed_password):
+        return hashlib.sha256(plain_password.encode()).hexdigest() == hashed_password
+    return pwd_context.verify(plain_password, hashed_password)
 
 
 def get_password_hash(password: str) -> str:
@@ -69,23 +81,29 @@ def get_password_hash(password: str) -> str:
 def authenticate_user(username: str, password: str) -> Optional[dict]:
     """Authenticate user against Redis (with fallback to defaults)."""
     redis = get_redis_service()
-    
+
     # First, ensure default users exist
     if not redis.has_any_users():
         init_default_users()
-    
+
     # Get user from Redis
     user = redis.get_user(username)
-    
+
     if not user:
         return None
-    
+
     if not verify_password(password, user.get("password_hash", "")):
         return None
-    
+
+    # Auto-upgrade legacy SHA-256 hash to bcrypt on successful login
+    stored_hash = user.get("password_hash", "")
+    if _is_legacy_sha256(stored_hash):
+        new_hash = hash_password(password)
+        redis.update_user_password(username, new_hash)
+        redis.add_log("info", "auth", f"Auto-upgraded password hash to bcrypt for '{username}'")
+
     return {
         "username": user["username"],
-        "password_hash": user["password_hash"],
         "role": user.get("role", "operator")
     }
 
@@ -112,7 +130,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
         token_data = TokenData(username=username, role=role)
     except JWTError:
         raise credentials_exception
-    
+
     return User(username=token_data.username, role=token_data.role)
 
 

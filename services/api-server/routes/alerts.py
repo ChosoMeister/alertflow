@@ -1,6 +1,7 @@
 """
 Alerts API - CRUD operations for alerts.
 """
+# pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional, List
 
@@ -16,11 +17,12 @@ async def list_alerts(
     offset: int = Query(default=0, ge=0),
     status: Optional[str] = None,
     severity: Optional[str] = None,
+    q: Optional[str] = None,
     user: User = Depends(get_current_user)
 ):
     """List alerts with pagination and optional filtering."""
     redis_svc = get_redis_service()
-    return redis_svc.list_alerts(limit=limit, offset=offset, status=status, severity=severity)
+    return redis_svc.list_alerts(limit=limit, offset=offset, status=status, severity=severity, q=q)
 
 
 @router.get("/count")
@@ -45,12 +47,22 @@ async def update_alert_status(alert_id: str, status: str, user: User = Depends(g
     """Update alert status (new, acknowledged, resolved)."""
     if status not in ["new", "acknowledged", "resolved"]:
         raise HTTPException(status_code=400, detail="Invalid status")
-    
+
     redis_svc = get_redis_service()
     if not redis_svc.update_alert_status(alert_id, status):
         raise HTTPException(status_code=404, detail="Alert not found")
-    
+
     redis_svc.add_log("INFO", "api", f"Alert {alert_id} status updated to {status}")
+
+    # Notify processor to update telegram/matrix messages
+    event_data = {
+        "manual_status_update": True,
+        "alert_id": alert_id,
+        "new_status": status,
+        "user": user.username if user else "UI User"
+    }
+    redis_svc.push_to_queue(event_data)
+
     return {"message": f"Alert status updated to {status}"}
 
 
@@ -61,7 +73,7 @@ async def rerun_ai_analysis(alert_id: str, user: User = Depends(get_current_user
     alert = redis_svc.get_alert(alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
-    
+
     # Re-queue the alert for processing
     email_data = {
         "from": alert.get("from_email", ""),
@@ -71,10 +83,10 @@ async def rerun_ai_analysis(alert_id: str, user: User = Depends(get_current_user
         "html": alert.get("html", ""),
         "reprocess_alert_id": alert_id,
     }
-    
+
     trace_id = redis_svc.push_to_queue(email_data)
     redis_svc.add_log("INFO", "api", f"Alert {alert_id} queued for re-analysis", {"trace_id": trace_id})
-    
+
     return {"message": "Alert queued for re-analysis", "trace_id": trace_id}
 
 
@@ -85,7 +97,7 @@ async def resend_notification(alert_id: str, user: User = Depends(get_current_us
     alert = redis_svc.get_alert(alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
-    
+
     # Queue for resend (processor will detect and resend)
     email_data = {
         "from": alert.get("from_email", ""),
@@ -96,8 +108,22 @@ async def resend_notification(alert_id: str, user: User = Depends(get_current_us
         "resend_alert_id": alert_id,
         "ai_raw": alert.get("ai_raw", ""),
     }
-    
+
     trace_id = redis_svc.push_to_queue(email_data)
     redis_svc.add_log("INFO", "api", f"Alert {alert_id} queued for resend", {"trace_id": trace_id})
-    
+
     return {"message": "Alert queued for resend", "trace_id": trace_id}
+
+
+@router.post("/force-summary")
+async def force_daily_summary(user: User = Depends(get_current_user)):
+    """Force send the daily summary immediately."""
+    redis_svc = get_redis_service()
+    event_data = {
+        "force_daily_summary": True,
+        "user": user.username if user else "UI User"
+    }
+    trace_id = redis_svc.push_to_queue(event_data)
+    redis_svc.add_log("INFO", "api", "Forced daily summary generation requested", {"trace_id": trace_id})
+
+    return {"message": "Daily summary generation triggered", "trace_id": trace_id}
