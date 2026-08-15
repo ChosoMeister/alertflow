@@ -122,12 +122,20 @@ async def get_general_settings(user: User = Depends(get_current_user)):
         summary_thread = os.getenv("TELEGRAM_DEFAULT_THREAD_ID", "0")
     if not summary_token:
         summary_token = os.getenv("TELEGRAM_DEFAULT_BOT_TOKEN", "")
+    def int_setting(name, default):
+        return int(settings_data.get(name) or os.getenv(name.upper(), str(default)))
 
     return GeneralSettings(
         alert_retention_days=int(retention),
         summary_telegram_chat_id=summary_chat,
         summary_telegram_thread_id=summary_thread,
-        summary_telegram_bot_token=summary_token
+        # Secrets are write-only. Never return the stored token to a browser.
+        summary_telegram_bot_token="",
+        summary_telegram_bot_token_configured=bool(summary_token),
+        global_storm_max_notifications=int_setting("global_storm_max_notifications", 20),
+        global_storm_window_seconds=int_setting("global_storm_window_seconds", 300),
+        storm_summary_interval_seconds=int_setting("storm_summary_interval_seconds", 300),
+        incident_sla_minutes=int_setting("incident_sla_minutes", 60),
     )
 
 @router.put("/general", response_model=GeneralSettings)
@@ -137,14 +145,32 @@ async def update_general_settings(
 ):
     """Update general system settings."""
     redis = get_redis_service()
+    existing_token = redis.client.hget("settings:general", "summary_telegram_bot_token") or ""
 
     mapping = {
         "alert_retention_days": str(settings.alert_retention_days),
         "summary_telegram_chat_id": settings.summary_telegram_chat_id or "",
         "summary_telegram_thread_id": settings.summary_telegram_thread_id or "0",
-        "summary_telegram_bot_token": settings.summary_telegram_bot_token or ""
+        "global_storm_max_notifications": str(settings.global_storm_max_notifications),
+        "global_storm_window_seconds": str(settings.global_storm_window_seconds),
+        "storm_summary_interval_seconds": str(settings.storm_summary_interval_seconds),
+        "incident_sla_minutes": str(settings.incident_sla_minutes),
     }
+    if settings.summary_telegram_bot_token:
+        mapping["summary_telegram_bot_token"] = settings.summary_telegram_bot_token
     redis.client.hset("settings:general", mapping=mapping)
     redis.add_log("info", "settings", f"Admin '{user.username}' updated general settings")
 
-    return settings
+    return GeneralSettings(
+        alert_retention_days=settings.alert_retention_days,
+        summary_telegram_chat_id=settings.summary_telegram_chat_id,
+        summary_telegram_thread_id=settings.summary_telegram_thread_id,
+        summary_telegram_bot_token="",
+        summary_telegram_bot_token_configured=bool(
+            settings.summary_telegram_bot_token or existing_token
+        ),
+        global_storm_max_notifications=settings.global_storm_max_notifications,
+        global_storm_window_seconds=settings.global_storm_window_seconds,
+        storm_summary_interval_seconds=settings.storm_summary_interval_seconds,
+        incident_sla_minutes=settings.incident_sla_minutes,
+    )

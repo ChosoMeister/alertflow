@@ -17,6 +17,12 @@ interface NotificationChannel {
     type: string;
     config: Record<string, any>;
     is_default: boolean;
+    secret_fields_configured?: string[];
+}
+
+interface NotificationDestination {
+    id: string; name: string; channel_id: string; type: string;
+    target: Record<string, string>; enabled: boolean; rule_count?: number;
 }
 
 const CHANNEL_TYPES = [
@@ -36,6 +42,10 @@ export default function NotificationChannelsPage() {
     const [showForm, setShowForm] = useState(false);
     const [editing, setEditing] = useState<NotificationChannel | null>(null);
     const [testing, setTesting] = useState<string | null>(null);
+    const [destinations, setDestinations] = useState<NotificationDestination[]>([]);
+    const [showDestinationForm, setShowDestinationForm] = useState(false);
+    const [editingDestination, setEditingDestination] = useState<NotificationDestination | null>(null);
+    const [destinationForm, setDestinationForm] = useState({ name: '', channel_id: '', type: 'telegram', target: {} as Record<string, string>, enabled: true });
 
     const [formData, setFormData] = useState({
         name: '',
@@ -59,6 +69,7 @@ export default function NotificationChannelsPage() {
         try {
             const data = await api.notificationChannels(token);
             setChannels(data);
+            setDestinations(await api.notificationDestinations(token));
         } catch (err) {
             toast({ title: 'Error', description: 'Failed to load channels', variant: 'destructive' });
         } finally {
@@ -140,6 +151,33 @@ export default function NotificationChannelsPage() {
         setFormData({ ...formData, config: { ...formData.config, [key]: value } });
     }
 
+    function selectDestinationConnector(channelId: string) {
+        const channel = channels.find(x => x.id === channelId);
+        setDestinationForm({ ...destinationForm, channel_id: channelId, type: channel?.type || 'telegram', target: {} });
+    }
+
+    async function saveDestination(e: React.FormEvent) {
+        e.preventDefault();
+        const token = localStorage.getItem('alertflow_token'); if (!token) return;
+        try {
+            if (editingDestination) await api.updateNotificationDestination(token, editingDestination.id, destinationForm);
+            else await api.createNotificationDestination(token, destinationForm);
+            setShowDestinationForm(false); setEditingDestination(null);
+            setDestinationForm({ name: '', channel_id: '', type: 'telegram', target: {}, enabled: true });
+            await loadChannels(); toast({ title: 'Success', description: 'Destination saved' });
+        } catch (err: any) { toast({ title: 'Error', description: err.message, variant: 'destructive' }); }
+    }
+
+    function editDestination(item: NotificationDestination) {
+        setEditingDestination(item); setDestinationForm({ name: item.name, channel_id: item.channel_id, type: item.type, target: item.target || {}, enabled: item.enabled }); setShowDestinationForm(true);
+    }
+
+    async function deleteDestination(id: string) {
+        const token = localStorage.getItem('alertflow_token'); if (!token || !confirm('Delete this destination?')) return;
+        try { await api.deleteNotificationDestination(token, id); await loadChannels(); }
+        catch (err: any) { toast({ title: 'Error', description: err.message, variant: 'destructive' }); }
+    }
+
     function renderConfigFields() {
         switch (formData.type) {
             case 'telegram':
@@ -148,10 +186,12 @@ export default function NotificationChannelsPage() {
                         <div>
                             <label className="text-sm font-medium">{t('bot_token')}</label>
                             <Input
+                                type="password"
+                                autoComplete="new-password"
                                 value={formData.config.bot_token || ''}
                                 onChange={e => updateConfig('bot_token', e.target.value)}
                                 placeholder={t('bot_token_placeholder')}
-                                required
+                                required={!editing}
                             />
                         </div>
                         <div>
@@ -198,10 +238,12 @@ export default function NotificationChannelsPage() {
                         <div>
                             <label className="text-sm font-medium">{t('access_token')}</label>
                             <Input
+                                type="password"
+                                autoComplete="new-password"
                                 value={formData.config.access_token || ''}
                                 onChange={e => updateConfig('access_token', e.target.value)}
                                 placeholder={t('access_token_placeholder')}
-                                required
+                                required={!editing}
                             />
                         </div>
                         <div>
@@ -220,10 +262,12 @@ export default function NotificationChannelsPage() {
                         <div>
                             <label className="text-sm font-medium">{t('api_key')}</label>
                             <Input
+                                type="password"
+                                autoComplete="new-password"
                                 value={formData.config.api_key || ''}
                                 onChange={e => updateConfig('api_key', e.target.value)}
                                 placeholder={t('api_key_placeholder')}
-                                required
+                                required={!editing}
                             />
                         </div>
                         <div>
@@ -405,6 +449,34 @@ export default function NotificationChannelsPage() {
                             );
                         })
                     )}
+                </div>
+
+                <div className="flex items-center justify-between mt-10 mb-4">
+                    <div><h2 className="text-2xl font-bold">Destinations</h2><p className="text-sm text-muted-foreground">Reusable Telegram chats/threads, Matrix rooms and other delivery endpoints.</p></div>
+                    <Button onClick={() => { setEditingDestination(null); setDestinationForm({ name: '', channel_id: channels[0]?.id || '', type: channels[0]?.type || 'telegram', target: {}, enabled: true }); setShowDestinationForm(true); }}>
+                        <Plus className="w-4 h-4 mr-2" />Add destination
+                    </Button>
+                </div>
+
+                {showDestinationForm && <Card className="mb-6 border-cyan-500/30"><CardHeader><CardTitle>{editingDestination ? 'Edit destination' : 'New destination'}</CardTitle></CardHeader><CardContent>
+                    <form onSubmit={saveDestination} className="space-y-4">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div><label className="text-sm font-medium">Destination name</label><Input value={destinationForm.name} onChange={e => setDestinationForm({...destinationForm, name:e.target.value})} required /></div>
+                            <div><label className="text-sm font-medium">Connector</label><select className="w-full h-10 px-3 rounded-md border bg-background" value={destinationForm.channel_id} onChange={e => selectDestinationConnector(e.target.value)} required><option value="">Select connector</option>{channels.map(ch => <option key={ch.id} value={ch.id}>{ch.name} ({ch.type})</option>)}</select></div>
+                        </div>
+                        {destinationForm.type === 'telegram' && <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div><label className="text-sm font-medium">Telegram Chat ID</label><Input placeholder="-100123456789" value={destinationForm.target.chat_id || ''} onChange={e => setDestinationForm({...destinationForm,target:{...destinationForm.target,chat_id:e.target.value}})} required /></div>
+                            <div><label className="text-sm font-medium">Thread ID</label><Input placeholder="0 (main chat)" value={destinationForm.target.thread_id || ''} onChange={e => setDestinationForm({...destinationForm,target:{...destinationForm.target,thread_id:e.target.value}})} /></div>
+                        </div>}
+                        {destinationForm.type === 'matrix' && <div><label className="text-sm font-medium">Matrix Room ID</label><Input placeholder="!room:server.example" value={destinationForm.target.room_id || ''} onChange={e => setDestinationForm({...destinationForm,target:{...destinationForm.target,room_id:e.target.value}})} required /></div>}
+                        {destinationForm.type === 'webhook' && <div><label className="text-sm font-medium">Webhook URL</label><Input value={destinationForm.target.url || ''} onChange={e => setDestinationForm({...destinationForm,target:{...destinationForm.target,url:e.target.value}})} required /></div>}
+                        {destinationForm.type === 'sms' && <div><label className="text-sm font-medium">Recipient</label><Input value={destinationForm.target.receptor || ''} onChange={e => setDestinationForm({...destinationForm,target:{...destinationForm.target,receptor:e.target.value}})} required /></div>}
+                        <div className="flex gap-2"><Button type="submit">Save destination</Button><Button type="button" variant="outline" onClick={() => setShowDestinationForm(false)}>Cancel</Button></div>
+                    </form>
+                </CardContent></Card>}
+
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                    {destinations.map(item => { const connector = channels.find(ch => ch.id === item.channel_id); const target = item.type === 'telegram' ? `${item.target.chat_id}${item.target.thread_id && item.target.thread_id !== '0' ? ` / thread ${item.target.thread_id}` : ''}` : item.target.room_id || item.target.url || item.target.receptor; return <Card key={item.id}><CardContent className="p-4 flex items-center justify-between"><div><p className="font-semibold">{item.name}</p><p className="text-sm text-muted-foreground">{connector?.name} · {target}</p><p className="text-xs text-muted-foreground mt-1">Used by {item.rule_count || 0} rule(s)</p></div><div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => editDestination(item)}>Edit</Button><Button size="sm" variant="destructive" disabled={!!item.rule_count} onClick={() => deleteDestination(item.id)}><Trash2 className="w-4 h-4" /></Button></div></CardContent></Card> })}
                 </div>
             </main>
         </div>

@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from '@/navigation';
+import { api } from '@/lib/api';
 
 /**
  * Self-contained auth hook — no Provider needed.
@@ -37,7 +38,8 @@ export function useAuth() {
     setIsLoading(false);
   }, [router]);
 
-  const logout = useCallback(() => {
+  const logout = useCallback(async () => {
+    await api.logout().catch(() => undefined);
     localStorage.removeItem('alertflow_token');
     localStorage.removeItem('alertflow_user');
     setToken(null);

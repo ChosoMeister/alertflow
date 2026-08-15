@@ -3,9 +3,9 @@
 @tailwind utilities;
 
 :root {
-  --background: 222 47% 11%;
+  --background: 218 45% 7%;
   --foreground: 210 40% 98%;
-  --card: 222 47% 15%;
+  --card: 217 39% 11%;
   --card-foreground: 210 40% 98%;
   --muted: 217 33% 17%;
   --muted-foreground: 215 20% 65%;
@@ -22,9 +22,44 @@
 }
 
 body {
-  background: hsl(var(--background));
+  background:
+    radial-gradient(circle at 8% -10%, rgba(6, 182, 212, .12), transparent 32rem),
+    radial-gradient(circle at 92% 0%, rgba(99, 102, 241, .09), transparent 28rem),
+    hsl(var(--background));
   color: hsl(var(--foreground));
   font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+@media (max-width: 1023px) {
+  main { margin-left: 0 !important; margin-right: 0 !important; padding: 1rem !important; padding-bottom: 5.5rem !important; }
+}
+
+@layer components {
+  .surface-card { @apply rounded-2xl border border-white/10 bg-slate-900/60 shadow-sm shadow-black/20 backdrop-blur-sm; }
+  .eyebrow { @apply text-[10px] font-semibold uppercase tracking-[.22em] text-cyan-400; }
+  .command-trigger { @apply flex w-full items-center gap-2 rounded-xl border border-white/10 bg-white/[.03] px-3 py-2.5 text-xs text-slate-400 transition hover:border-cyan-400/30 hover:bg-cyan-400/5 hover:text-slate-200; }
+  .command-trigger kbd { @apply ms-auto rounded border border-white/10 px-1.5 py-0.5 text-[10px]; }
+  .icon-button { @apply rounded-xl border border-white/10 p-2 text-slate-400 transition hover:bg-white/5 hover:text-white; }
+  .severity-pill { @apply rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider; }
+  .severity-critical { @apply border-red-400/30 bg-red-500/10 text-red-300; }
+  .severity-high { @apply border-orange-400/30 bg-orange-500/10 text-orange-300; }
+  .severity-medium { @apply border-amber-400/30 bg-amber-500/10 text-amber-300; }
+  .severity-low, .severity-info { @apply border-cyan-400/30 bg-cyan-500/10 text-cyan-300; }
+  .severity-unknown { @apply border-slate-400/20 bg-slate-500/10 text-slate-400; }
+  .status-pill { @apply rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-300; }
+  .resource-chip { @apply max-w-full truncate rounded-lg border border-cyan-400/15 bg-cyan-400/[.06] px-2.5 py-1 font-mono text-[11px] text-cyan-200; }
+  .section-heading { @apply flex items-center gap-3; }
+  .section-heading h3 { @apply text-sm font-semibold; }
+  .section-heading p { @apply text-xs text-slate-500; }
+  .data-tile { @apply min-w-0 rounded-xl border border-white/[.07] bg-black/10 p-3; }
+  .data-tile span { @apply block text-[10px] uppercase tracking-wider text-slate-500; }
+  .data-tile strong { @apply mt-1.5 block text-sm font-medium text-slate-200; }
+  .timeline-row { @apply grid grid-cols-[2rem_1fr] gap-3; }
+  .timeline-rail { @apply flex flex-col items-center; }
+  .timeline-rail span { @apply flex h-8 w-8 items-center justify-center rounded-full border border-cyan-400/20 bg-cyan-400/10 text-cyan-300; }
+  .timeline-rail i { @apply mt-1 h-full min-h-6 w-px bg-white/10; }
+  .skeleton-block { @apply animate-pulse rounded-2xl bg-white/5; }
+  .metric-value { @apply text-3xl font-semibold tracking-tight text-white; }
 }
 
 /* Scrollbar styling */

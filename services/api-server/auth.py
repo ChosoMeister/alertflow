@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 import hashlib
 from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel
@@ -13,7 +13,7 @@ from services.redis_service import get_redis_service
 settings = get_settings()
 
 # OAuth2 scheme
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
 # Password hashing (bcrypt)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -115,12 +115,19 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     return jwt.encode(to_encode, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
+async def get_current_user(
+    request: Request,
+    bearer_token: Optional[str] = Depends(oauth2_scheme),
+) -> User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    token = bearer_token or request.cookies.get("alertflow_session")
+    if not token:
+        raise credentials_exception
+
     try:
         payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
         username: str = payload.get("sub")
@@ -139,5 +146,15 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required"
+        )
+    return user
+
+
+def require_operator(user: User = Depends(get_current_user)) -> User:
+    """Allow state-changing operational actions to operators and admins only."""
+    if user.role not in {"admin", "operator"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operator access required",
         )
     return user

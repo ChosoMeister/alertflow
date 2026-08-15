@@ -8,7 +8,7 @@ import { Sidebar } from '@/components/sidebar';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { api } from '@/lib/api';
 import {
-    BarChart3, TrendingUp, Users, Clock, Brain, Shield, CheckCircle
+    BarChart3, TrendingUp, Users, Clock, Brain, Shield, CheckCircle, Gauge, BellOff, GitMerge
 } from 'lucide-react';
 
 const SEVERITY_COLORS: Record<string, string> = {
@@ -74,6 +74,53 @@ export default function AnalyticsPage() {
                     <p className="text-muted-foreground">{t('no_data')}</p>
                 ) : (
                     <div className="space-y-6">
+                        <Card className="overflow-hidden border-cyan-500/20">
+                            <div className="h-1 bg-gradient-to-r from-cyan-500 via-violet-500 to-emerald-500" />
+                            <CardHeader>
+                                <CardTitle className="flex items-center gap-2"><Gauge className="h-5 w-5 text-cyan-400" />{t('reliability_title')}</CardTitle>
+                                <CardDescription>{t('reliability_desc')}</CardDescription>
+                            </CardHeader>
+                            <CardContent className="space-y-5">
+                                <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+                                    {[
+                                        [t('operational_score'), data.reliability_scorecard?.operational_score_percent, '%'],
+                                        [t('ai_coverage'), data.reliability_scorecard?.ai_analysis_coverage_percent, '%'],
+                                        [t('decision_coverage'), data.reliability_scorecard?.decision_trace_coverage_percent, '%'],
+                                        [t('prevented_notifications'), data.reliability_scorecard?.prevented_notifications, ''],
+                                        [t('merged_updates'), data.reliability_scorecard?.merged_updates, ''],
+                                    ].map(([label, value, suffix]) => <div key={String(label)} className="data-tile min-w-0"><span>{label}</span><strong className="text-2xl">{value ?? '—'}{value != null ? suffix : ''}</strong></div>)}
+                                </div>
+                                <div className="grid gap-3 lg:grid-cols-2">
+                                    <div className="rounded-xl border border-white/10 p-4"><div className="flex items-center gap-2 text-sm font-semibold"><BellOff className="h-4 w-4 text-amber-300" />{t('suppression_reasons')}</div><div className="mt-3 flex flex-wrap gap-2">{Object.entries(data.reliability_scorecard?.suppressed_by_reason || {}).length ? Object.entries(data.reliability_scorecard.suppressed_by_reason).map(([reason, count]) => <span key={reason} className="resource-chip">{reason.replaceAll('_', ' ')} · {String(count)}</span>) : <span className="text-xs text-muted-foreground">{t('none_recorded')}</span>}</div></div>
+                                    <div className="rounded-xl border border-white/10 p-4"><div className="flex items-center gap-2 text-sm font-semibold"><GitMerge className="h-4 w-4 text-violet-300" />{t('correlation_actions')}</div><div className="mt-3 flex flex-wrap gap-2">{Object.entries(data.reliability_scorecard?.correlation_actions || {}).map(([action, count]) => <span key={action} className="resource-chip">{action} · {String(count)}</span>)}</div></div>
+                                </div>
+                                <p className="text-xs leading-5 text-muted-foreground">{t('reliability_note')}</p>
+                            </CardContent>
+                        </Card>
+                        <Card>
+                            <CardHeader>
+                                <CardTitle>{t('slo_title')}</CardTitle>
+                                <CardDescription>{t('slo_desc')}</CardDescription>
+                            </CardHeader>
+                            <CardContent>
+                                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-4">
+                                    {[
+                                        [t('availability'), data.slo?.availability_percent, '%'],
+                                        [t('final_delivery_success'), data.slo?.final_delivery_success_percent, '%'],
+                                        [t('attempt_delivery_success'), data.slo?.delivery_success_percent, '%'],
+                                        [t('ai_success'), data.slo?.ai_success_percent, '%'],
+                                        [t('mttr'), data.slo?.mean_time_to_resolve_minutes, 'm'],
+                                        [t('fallback_uses'), data.slo?.fallback_uses, ''],
+                                        [t('storm_suppressed'), data.slo?.storm_notifications_suppressed, ''],
+                                    ].map(([label, value, suffix]) => (
+                                        <div key={String(label)} className="rounded-lg border bg-muted/20 p-4">
+                                            <p className="text-2xl font-bold">{value ?? '—'}{value != null ? suffix : ''}</p>
+                                            <p className="mt-1 text-xs text-muted-foreground">{label}</p>
+                                        </div>
+                                    ))}
+                                </div>
+                            </CardContent>
+                        </Card>
                         {/* Summary Cards */}
                         <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
                             <Card>

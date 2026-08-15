@@ -17,6 +17,8 @@ import {
 interface QueueMetrics {
     queue_depth: number;
     dlq_depth: number;
+    dlq_active_depth: number;
+    dlq_superseded_depth: number;
     retry_queue_depth: number;
     processed_count: number;
     error_count: number;
@@ -32,6 +34,10 @@ interface DlqItem {
     retry_count: number;
     scheduled_at: string;
     queued_at: string;
+    failed_at: string;
+    failure_reason: string;
+    lifecycle: 'active' | 'superseded' | 'historical';
+    incident_status: string;
 }
 
 interface RetryItem {
@@ -201,8 +207,11 @@ export default function QueuePage() {
                                     <AlertTriangle className="h-5 w-5 text-red-400" />
                                 </div>
                                 <div>
-                                    <p className="text-2xl font-bold">{metrics?.dlq_depth ?? 0}</p>
-                                    <p className="text-xs text-muted-foreground">{t('dlq')}</p>
+                                    <p className="text-2xl font-bold">{metrics?.dlq_active_depth ?? 0}</p>
+                                    <p className="text-xs text-muted-foreground">{t('active_dlq')}</p>
+                                    {(metrics?.dlq_superseded_depth ?? 0) > 0 && (
+                                        <p className="text-[11px] text-emerald-400">{metrics?.dlq_superseded_depth} {t('superseded')}</p>
+                                    )}
                                 </div>
                             </div>
                         </CardContent>
@@ -377,14 +386,17 @@ export default function QueuePage() {
                                                     </span>
                                                 </td>
                                                 <td className="py-2 px-3 text-xs">
-                                                    {formatTime(item.scheduled_at || item.queued_at)}
+                                                    <div>{formatTime(item.failed_at || item.scheduled_at || item.queued_at)}</div>
+                                                    <span className={`inline-flex mt-1 px-2 py-0.5 rounded-full text-[11px] ${item.lifecycle === 'active' ? 'bg-red-500/20 text-red-400' : 'bg-emerald-500/20 text-emerald-400'}`}>
+                                                        {item.lifecycle === 'active' ? t('active_failure') : t('superseded')}
+                                                    </span>
                                                 </td>
                                                 <td className="py-2 px-3 text-right">
                                                     <Button
                                                         variant="outline"
                                                         size="sm"
                                                         onClick={() => handleRequeue(item.index)}
-                                                        disabled={actionLoading === `requeue-${item.index}`}
+                                                        disabled={actionLoading === `requeue-${item.index}` || item.lifecycle !== 'active'}
                                                     >
                                                         {actionLoading === `requeue-${item.index}` ? (
                                                             <Loader2 className="h-3 w-3 animate-spin" />

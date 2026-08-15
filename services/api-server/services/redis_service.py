@@ -39,21 +39,32 @@ class RedisService:
     # ========================
 
     def push_to_queue(self, data: Dict[str, Any]) -> str:
-        """Push message to alert queue and return trace ID."""
+        """Publish a durable stream message and return its trace ID."""
         trace_id = str(uuid.uuid4())[:8]
         data["trace_id"] = trace_id
         data["queued_at"] = datetime.utcnow().isoformat()
-        self.client.rpush("alert_queue", json.dumps(data))
+        self.client.xadd(
+            "alerts:stream",
+            {"payload": json.dumps(data), "trace_id": trace_id},
+            maxlen=100000,
+            approximate=True,
+        )
         return trace_id
 
     def get_queue_depth(self) -> int:
-        return self.client.llen("alert_queue")
+        return self.client.xlen("alerts:stream") + self.client.llen("alert_queue")
 
     def get_dlq_depth(self) -> int:
         return self.client.llen("alert_dead_letter_queue")
 
     def get_retry_queue_depth(self) -> int:
         return self.client.zcard("retry_queue")
+
+    def get_stream_pending(self) -> int:
+        try:
+            return sum(int(group.get("pending", 0)) for group in self.client.xinfo_groups("alerts:stream"))
+        except redis.ResponseError:
+            return 0
 
     def get_dlq_items(self, limit: int = 50) -> list:
         """Get items from the Dead Letter Queue."""
@@ -62,6 +73,8 @@ class RedisService:
         for i, item in enumerate(items):
             try:
                 data = json.loads(item)
+                incident_key = data.get("incident_key", "")
+                lifecycle = self._classify_dlq_item(data)
                 result.append({
                     "index": i,
                     "sender": data.get("from", data.get("sender", "")),
@@ -69,10 +82,58 @@ class RedisService:
                     "retry_count": data.get("retry_count", 0),
                     "scheduled_at": data.get("scheduled_at", ""),
                     "queued_at": data.get("queued_at", ""),
+                    "failed_at": data.get("failed_at", ""),
+                    "failure_reason": data.get("failure_reason", "maximum_retries_exhausted"),
+                    "incident_key": incident_key,
+                    "incident_revision": int(data.get("incident_revision", 0) or 0),
+                    "channel_ids": data.get("notification_channel_ids", []),
+                    **lifecycle,
                 })
             except:
                 result.append({"index": i, "sender": "parse_error", "subject": str(item)[:100]})
         return result
+
+    def _classify_dlq_item(self, data: dict) -> dict:
+        """Distinguish actionable failures from entries superseded by newer delivery."""
+        incident_key = data.get("incident_key", "")
+        if not incident_key:
+            return {"lifecycle": "active", "incident_status": "unknown"}
+        raw = self.client.get(f"incident:{incident_key}")
+        if not raw:
+            return {"lifecycle": "historical", "incident_status": "expired"}
+        try:
+            state = json.loads(raw)
+        except json.JSONDecodeError:
+            return {"lifecycle": "active", "incident_status": "unknown"}
+        required = list(data.get("notification_channel_ids", []) or [])
+        latest = {}
+        for _, fields in self.client.xrevrange(f"incident:events:{incident_key}", count=200):
+            channel_id = fields.get("channel_id", "")
+            if fields.get("action") == "DELIVERY" and channel_id and channel_id not in latest:
+                latest[channel_id] = fields
+        queued_revision = int(data.get("incident_revision", 0) or 0)
+        current_revision = int(state.get("revision", 1) or 1)
+        if required:
+            recovered = all(latest.get(channel_id, {}).get("status") == "delivered" for channel_id in required)
+        else:
+            scheduled_at = str(data.get("scheduled_at", ""))
+            recovered = any(
+                event.get("status") == "delivered" and event.get("occurred_at", "") > scheduled_at
+                for event in latest.values()
+            )
+        superseded = recovered and (not queued_revision or current_revision > queued_revision)
+        return {
+            "lifecycle": "superseded" if superseded else "active",
+            "incident_status": str(state.get("status", "unknown")).lower(),
+            "current_incident_revision": current_revision,
+        }
+
+    def get_dlq_lifecycle_counts(self) -> Dict[str, int]:
+        counts = {"active": 0, "superseded": 0, "historical": 0}
+        for item in self.get_dlq_items(limit=1000):
+            lifecycle = item.get("lifecycle", "active")
+            counts[lifecycle] = counts.get(lifecycle, 0) + 1
+        return counts
 
     def get_retry_queue_items(self, limit: int = 50) -> list:
         """Get items from the retry queue with their scores (next retry timestamp)."""
@@ -105,15 +166,19 @@ class RedisService:
             return False
         try:
             data = json.loads(items[0])
+            if self._classify_dlq_item(data).get("lifecycle") != "active":
+                return False
             # Get original payload if available, otherwise use the data itself
             original = data.get("original_payload")
             if original:
-                self.client.rpush("alert_queue", original)
+                self.client.xadd("alerts:stream", {"payload": original}, maxlen=100000, approximate=True)
             else:
-                self.client.rpush("alert_queue", items[0])
+                self.client.xadd("alerts:stream", {"payload": items[0]}, maxlen=100000, approximate=True)
             # Remove from DLQ (mark and clean approach)
             self.client.lset("alert_dead_letter_queue", index, "__REMOVED__")
             self.client.lrem("alert_dead_letter_queue", 1, "__REMOVED__")
+            if data.get("dlq_dedupe_key"):
+                self.client.delete(data["dlq_dedupe_key"])
             return True
         except:
             return False
@@ -127,21 +192,6 @@ class RedisService:
         rule_id = str(uuid.uuid4())[:8]
         now = datetime.utcnow().isoformat()
 
-        # Handle notification_channel_ids as JSON string
-        channel_ids = rule_data.get("notification_channel_ids", [])
-        if isinstance(channel_ids, list):
-            channel_ids = json.dumps(channel_ids)
-
-        # Handle channel_overrides as JSON string
-        overrides = rule_data.get("channel_overrides", {})
-        if isinstance(overrides, dict):
-            overrides = json.dumps(overrides)
-
-        # Handle severity_matrix as JSON string
-        severity_matrix = rule_data.get("severity_matrix", {})
-        if isinstance(severity_matrix, dict):
-            severity_matrix = json.dumps(severity_matrix)
-
         rule = {
             "id": rule_id,
             "name": rule_data.get("name", ""),
@@ -149,15 +199,12 @@ class RedisService:
             "priority": str(rule_data.get("priority", 0)),
             "match_field": rule_data.get("match_field", "from"),
             "email_pattern": rule_data.get("email_pattern", ""),
-            "telegram_chat_id": rule_data.get("telegram_chat_id", ""),
-            "telegram_thread_id": rule_data.get("telegram_thread_id", "0"),
-            "matrix_room_id": rule_data.get("matrix_room_id", ""),
-            "channels": rule_data.get("channels", "telegram"),
             "notes": rule_data.get("notes", ""),
             "ai_provider_id": rule_data.get("ai_provider_id", "") or "",
-            "notification_channel_ids": channel_ids,
-            "channel_overrides": overrides,
-            "severity_matrix": severity_matrix,
+            "alert_destination_ids": json.dumps(rule_data.get("alert_destination_ids", [])),
+            "resolved_destination_ids": json.dumps(rule_data.get("resolved_destination_ids", [])),
+            "severity_destination_ids": json.dumps(rule_data.get("severity_destination_ids", {})),
+            "resolution_mode": rule_data.get("resolution_mode", "legacy") or "legacy",
             "created_at": now,
             "updated_at": now,
         }
@@ -172,36 +219,18 @@ class RedisService:
         if not self.client.exists(f"routing_rule:{rule_id}"):
             return False
 
-        # Handle notification_channel_ids as JSON string
-        channel_ids = rule_data.get("notification_channel_ids", [])
-        if isinstance(channel_ids, list):
-            channel_ids = json.dumps(channel_ids)
-
-        # Handle channel_overrides as JSON string
-        overrides = rule_data.get("channel_overrides", {})
-        if isinstance(overrides, dict):
-            overrides = json.dumps(overrides)
-
-        # Handle severity_matrix as JSON string
-        severity_matrix = rule_data.get("severity_matrix", {})
-        if isinstance(severity_matrix, dict):
-            severity_matrix = json.dumps(severity_matrix)
-
         updates = {
             "name": rule_data.get("name", ""),
             "enabled": str(rule_data.get("enabled", True)).lower(),
             "priority": str(rule_data.get("priority", 0)),
             "match_field": rule_data.get("match_field", "from"),
             "email_pattern": rule_data.get("email_pattern", ""),
-            "telegram_chat_id": rule_data.get("telegram_chat_id", ""),
-            "telegram_thread_id": rule_data.get("telegram_thread_id", "0"),
-            "matrix_room_id": rule_data.get("matrix_room_id", ""),
-            "channels": rule_data.get("channels", "telegram"),
             "notes": rule_data.get("notes", ""),
             "ai_provider_id": rule_data.get("ai_provider_id", "") or "",
-            "notification_channel_ids": channel_ids,
-            "channel_overrides": overrides,
-            "severity_matrix": severity_matrix,
+            "alert_destination_ids": json.dumps(rule_data.get("alert_destination_ids", [])),
+            "resolved_destination_ids": json.dumps(rule_data.get("resolved_destination_ids", [])),
+            "severity_destination_ids": json.dumps(rule_data.get("severity_destination_ids", {})),
+            "resolution_mode": rule_data.get("resolution_mode", "legacy") or "legacy",
             "updated_at": datetime.utcnow().isoformat(),
         }
 
@@ -246,26 +275,100 @@ class RedisService:
         rule["enabled"] = rule.get("enabled", "true").lower() == "true"
         rule["priority"] = int(rule.get("priority", 0))
         rule["ai_provider_id"] = rule.get("ai_provider_id", "") or None
-
+        rule["resolution_mode"] = rule.get("resolution_mode", "legacy") or "legacy"
+        for field in ("alert_destination_ids", "resolved_destination_ids"):
+            try:
+                rule[field] = json.loads(rule.get(field, "[]") or "[]")
+            except (TypeError, json.JSONDecodeError):
+                rule[field] = []
         try:
-            channel_ids = rule.get("notification_channel_ids", "[]")
-            rule["notification_channel_ids"] = json.loads(channel_ids) if channel_ids else []
-        except:
-            rule["notification_channel_ids"] = []
-
-        try:
-            overrides = rule.get("channel_overrides", "{}")
-            rule["channel_overrides"] = json.loads(overrides) if overrides else {}
-        except:
-            rule["channel_overrides"] = {}
-
-        try:
-            sev_matrix = rule.get("severity_matrix", "{}")
-            rule["severity_matrix"] = json.loads(sev_matrix) if sev_matrix else {}
-        except:
-            rule["severity_matrix"] = {}
+            rule["severity_destination_ids"] = json.loads(rule.get("severity_destination_ids", "{}") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            rule["severity_destination_ids"] = {}
 
         return rule
+
+    # ========================
+    # Resolution Profiles
+    # ========================
+
+    def add_resolution_profile(self, profile_data: Dict[str, Any]) -> Dict[str, Any]:
+        profile_id = str(uuid.uuid4())[:8]
+        now = datetime.utcnow().isoformat()
+        profile = {
+            "id": profile_id,
+            "name": profile_data.get("name", ""),
+            "enabled": str(profile_data.get("enabled", True)).lower(),
+            "notification_channel_ids": json.dumps(profile_data.get("notification_channel_ids", [])),
+            "channel_overrides": json.dumps(profile_data.get("channel_overrides", {})),
+            "notes": profile_data.get("notes", ""),
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.client.hset(f"resolution_profile:{profile_id}", mapping=profile)
+        self.client.sadd("resolution_profiles:index", profile_id)
+        return self.get_resolution_profile(profile_id)
+
+    def _normalize_resolution_profile(self, profile: Dict[str, Any]) -> Dict[str, Any]:
+        if not profile:
+            return None
+        profile["enabled"] = profile.get("enabled", "true").lower() == "true"
+        for field, fallback in (("notification_channel_ids", []), ("channel_overrides", {})):
+            try:
+                profile[field] = json.loads(profile.get(field) or json.dumps(fallback))
+            except (TypeError, json.JSONDecodeError):
+                profile[field] = fallback
+        return profile
+
+    def get_resolution_profile(self, profile_id: str) -> Optional[Dict[str, Any]]:
+        return self._normalize_resolution_profile(
+            self.client.hgetall(f"resolution_profile:{profile_id}")
+        )
+
+    def list_resolution_profiles(self) -> List[Dict[str, Any]]:
+        ids = sorted(self.client.smembers("resolution_profiles:index") or set())
+        if not ids:
+            return []
+        pipe = self.client.pipeline(transaction=False)
+        for profile_id in ids:
+            pipe.hgetall(f"resolution_profile:{profile_id}")
+        rules = self.list_routing_rules()
+        usage = {}
+        for rule in rules:
+            profile_id = rule.get("resolution_profile_id")
+            if profile_id:
+                usage[profile_id] = usage.get(profile_id, 0) + 1
+        profiles = []
+        for raw in pipe.execute():
+            profile = self._normalize_resolution_profile(raw)
+            if profile:
+                profile["rule_count"] = usage.get(profile["id"], 0)
+                profiles.append(profile)
+        return sorted(profiles, key=lambda item: item.get("name", "").lower())
+
+    def update_resolution_profile(self, profile_id: str, profile_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        key = f"resolution_profile:{profile_id}"
+        if not self.client.exists(key):
+            return None
+        self.client.hset(key, mapping={
+            "name": profile_data.get("name", ""),
+            "enabled": str(profile_data.get("enabled", True)).lower(),
+            "notification_channel_ids": json.dumps(profile_data.get("notification_channel_ids", [])),
+            "channel_overrides": json.dumps(profile_data.get("channel_overrides", {})),
+            "notes": profile_data.get("notes", ""),
+            "updated_at": datetime.utcnow().isoformat(),
+        })
+        return self.get_resolution_profile(profile_id)
+
+    def delete_resolution_profile(self, profile_id: str) -> bool:
+        if any(rule.get("resolution_profile_id") == profile_id for rule in self.list_routing_rules()):
+            return False
+        key = f"resolution_profile:{profile_id}"
+        if not self.client.exists(key):
+            return False
+        self.client.delete(key)
+        self.client.srem("resolution_profiles:index", profile_id)
+        return True
 
     # ========================
     # Alerts
@@ -297,7 +400,11 @@ class RedisService:
         }
 
         self.client.hset(f"alert:{alert_id}", mapping=alert)
-        self.client.zadd("alerts:index", {alert_id: time.time()})
+        score = time.time()
+        self.client.zadd("alerts:index", {alert_id: score})
+        self.client.zadd("alerts:status:new", {alert_id: score})
+        self.client.zadd("alerts:severity:unclassified", {alert_id: score})
+        self.client.zadd("alerts:category:unclassified", {alert_id: score})
 
         return alert_id
 
@@ -311,6 +418,13 @@ class RedisService:
             "severity": analysis.get("severity", ""),
             "category": analysis.get("category", ""),
             "confidence": str(analysis.get("confidence", "")),
+            "model_confidence": str(analysis.get("model_confidence", analysis.get("confidence", ""))),
+            "evidence_confidence": str(analysis.get("evidence_confidence", analysis.get("confidence", ""))),
+            "evidence_status": analysis.get("evidence_status", "unknown"),
+            "validation_warnings": json.dumps(analysis.get("validation_warnings", [])),
+            "taxonomy_overrides": json.dumps(analysis.get("taxonomy_overrides", [])),
+            "event_state": analysis.get("event_state", ""),
+            "incident_severity": analysis.get("incident_severity", analysis.get("severity", "")),
             "system_name": analysis.get("system_name", ""),
             "main_message": analysis.get("main_message", ""),
             "details": analysis.get("details", ""),
@@ -331,13 +445,27 @@ class RedisService:
             # Cannot manually update status of system-resolved alerts
             return False
 
+        old_status = alert.get("status", "new").lower()
+        score = self.client.zscore("alerts:index", alert_id) or time.time()
         self.client.hset(f"alert:{alert_id}", "status", status)
         self.client.hset(f"alert:{alert_id}", "updated_at", datetime.utcnow().isoformat())
+        self.client.zrem(f"alerts:status:{old_status}", alert_id)
+        self.client.zadd(f"alerts:status:{status.lower()}", {alert_id: score})
         return True
 
     def get_alert(self, alert_id: str) -> Optional[Dict[str, Any]]:
         """Get a single alert by ID."""
-        return self.client.hgetall(f"alert:{alert_id}")
+        alert = self.client.hgetall(f"alert:{alert_id}")
+        if not alert:
+            return alert
+        delivery = {}
+        for channel_id, value in self.client.hgetall(f"delivery:{alert_id}").items():
+            try:
+                delivery[channel_id] = json.loads(value)
+            except (TypeError, json.JSONDecodeError):
+                delivery[channel_id] = {"status": "unknown"}
+        alert["delivery"] = delivery
+        return alert
 
     def list_alerts(
         self,
@@ -347,55 +475,73 @@ class RedisService:
         severity: Optional[str] = None,
         q: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """List alerts with filtering (including text search) and pagination."""
-        # Fetch all alert IDs, most recent first
-        alert_ids = self.client.zrevrange("alerts:index", 0, -1)
-        if not alert_ids:
-            return []
+        """List alerts using sorted indexes; text search scans bounded chunks."""
+        temporary_keys = []
+        candidate_key = "alerts:index"
 
-        # Pipelined fetch for all hashes
-        pipe = self.client.pipeline(transaction=False)
-        for aid in alert_ids:
-            pipe.hgetall(f"alert:{aid}")
-        results = pipe.execute()
+        if status:
+            if status == "open":
+                open_key = f"alerts:tmp:{uuid.uuid4().hex}"
+                self.client.zunionstore(open_key, [
+                    "alerts:status:new", "alerts:status:acknowledged", "alerts:status:duplicate"
+                ], aggregate="MAX")
+                self.client.expire(open_key, 60)
+                temporary_keys.append(open_key)
+                candidate_key = open_key
+            else:
+                candidate_key = f"alerts:status:{status.lower()}"
+
+        if severity:
+            severity_key = f"alerts:severity:{severity.lower()}"
+            if candidate_key == "alerts:index" and not status:
+                candidate_key = severity_key
+            else:
+                intersection_key = f"alerts:tmp:{uuid.uuid4().hex}"
+                self.client.zinterstore(intersection_key, [candidate_key, severity_key], aggregate="MAX")
+                self.client.expire(intersection_key, 60)
+                temporary_keys.append(intersection_key)
+                candidate_key = intersection_key
+
+        q_lower = q.lower() if q else None
+        if not q_lower:
+            alert_ids = self.client.zrevrange(candidate_key, offset, offset + limit - 1)
+            if not alert_ids:
+                return []
+            pipe = self.client.pipeline(transaction=False)
+            for alert_id in alert_ids:
+                pipe.hgetall(f"alert:{alert_id}")
+            return [alert for alert in pipe.execute() if alert]
 
         alerts = []
-        q_lower = q.lower() if q else None
-
-        for alert in results:
-            if not alert:
-                continue
-
-            if status:
-                if status == "open":
-                    if alert.get("status") not in ("new", "acknowledged", "duplicate"):
-                        continue
-                else:
-                    if alert.get("status") != status:
-                        continue
-
-            if severity and alert.get("severity") != severity:
-                continue
-
-            if q_lower:
-                # Search across key fields
+        matched_seen = 0
+        cursor = 0
+        chunk_size = 200
+        while len(alerts) < limit:
+            alert_ids = self.client.zrevrange(candidate_key, cursor, cursor + chunk_size - 1)
+            if not alert_ids:
+                break
+            pipe = self.client.pipeline(transaction=False)
+            for alert_id in alert_ids:
+                pipe.hgetall(f"alert:{alert_id}")
+            for alert in pipe.execute():
+                if not alert:
+                    continue
                 searchable = " ".join([
-                    alert.get("subject", ""),
-                    alert.get("system_name", ""),
-                    alert.get("main_message", ""),
-                    alert.get("body", ""),
-                    alert.get("from_email", ""),
-                    alert.get("category", ""),
-                    alert.get("details", "")
+                    alert.get("subject", ""), alert.get("system_name", ""),
+                    alert.get("main_message", ""), alert.get("body", ""),
+                    alert.get("from_email", ""), alert.get("category", ""),
+                    alert.get("details", ""),
                 ]).lower()
-
                 if q_lower not in searchable:
                     continue
-
-            alerts.append(alert)
-
-        # Apply pagination after filtering
-        return alerts[offset:offset + limit]
+                if matched_seen < offset:
+                    matched_seen += 1
+                    continue
+                alerts.append(alert)
+                if len(alerts) >= limit:
+                    break
+            cursor += len(alert_ids)
+        return alerts
 
     def count_alerts(self) -> int:
         return self.client.zcard("alerts:index")
@@ -435,7 +581,11 @@ class RedisService:
     def get_metrics(self) -> Dict[str, int]:
         """Get all metrics."""
         metrics = self.client.hgetall("metrics:processor") or {}
-        return {k: int(v) for k, v in metrics.items()}
+        result = {k: int(v) for k, v in metrics.items()}
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        daily = self.client.hgetall(f"metrics:processor:daily:{today}") or {}
+        result.update({f"{k}_24h": int(v) for k, v in daily.items()})
+        return result
 
     # ========================
     # Logs
@@ -550,6 +700,7 @@ class RedisService:
             "api_key": provider_data.get("api_key", ""),
             "timeout": str(provider_data.get("timeout", 120)),
             "is_default": str(provider_data.get("is_default", False)).lower(),
+            "is_fallback": str(provider_data.get("is_fallback", False)).lower(),
         }
 
         self.client.hset(f"ai_provider:{provider_id}", mapping=provider)
@@ -567,6 +718,7 @@ class RedisService:
             "api_key": provider_data.get("api_key", ""),
             "timeout": str(provider_data.get("timeout", 120)),
             "is_default": str(provider_data.get("is_default", False)).lower(),
+            "is_fallback": str(provider_data.get("is_fallback", False)).lower(),
         }
         self.client.hset(f"ai_provider:{provider_id}", mapping=updates)
         return self.get_ai_provider(provider_id)
@@ -604,6 +756,11 @@ class RedisService:
         for pid in self.client.smembers("ai_providers:index") or set():
             self.client.hset(f"ai_provider:{pid}", "is_default", "false")
 
+    def unset_fallback_ai_provider(self):
+        """Unset all fallback AI providers."""
+        for pid in self.client.smembers("ai_providers:index") or set():
+            self.client.hset(f"ai_provider:{pid}", "is_fallback", "false")
+
     def get_default_ai_provider(self) -> Optional[Dict[str, Any]]:
         """Get the default AI provider."""
         for pid in self.client.smembers("ai_providers:index") or set():
@@ -618,6 +775,7 @@ class RedisService:
             return None
         provider["timeout"] = int(provider.get("timeout", 120))
         provider["is_default"] = provider.get("is_default", "false").lower() == "true"
+        provider["is_fallback"] = provider.get("is_fallback", "false").lower() == "true"
         return provider
 
     # ========================
@@ -695,6 +853,77 @@ class RedisService:
         except:
             channel["config"] = {}
         return channel
+
+    # ========================
+    # Notification Destinations
+    # ========================
+
+    def add_notification_destination(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        destination_id = str(uuid.uuid4())[:8]
+        now = datetime.utcnow().isoformat()
+        item = {
+            "id": destination_id, "name": data.get("name", ""),
+            "channel_id": data.get("channel_id", ""), "type": data.get("type", ""),
+            "target": json.dumps(data.get("target", {})),
+            "enabled": str(data.get("enabled", True)).lower(),
+            "created_at": now, "updated_at": now,
+        }
+        self.client.hset(f"notification_destination:{destination_id}", mapping=item)
+        self.client.sadd("notification_destinations:index", destination_id)
+        return self._normalize_destination(item)
+
+    def _normalize_destination(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not item:
+            return None
+        item["enabled"] = item.get("enabled", "true").lower() == "true"
+        try:
+            item["target"] = json.loads(item.get("target", "{}") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            item["target"] = {}
+        return item
+
+    def get_notification_destination(self, destination_id: str) -> Optional[Dict[str, Any]]:
+        return self._normalize_destination(self.client.hgetall(f"notification_destination:{destination_id}"))
+
+    def get_notification_destinations(self) -> List[Dict[str, Any]]:
+        ids = sorted(self.client.smembers("notification_destinations:index") or set())
+        if not ids:
+            return []
+        pipe = self.client.pipeline(transaction=False)
+        for destination_id in ids:
+            pipe.hgetall(f"notification_destination:{destination_id}")
+        return [self._normalize_destination(x) for x in pipe.execute() if x]
+
+    def update_notification_destination(self, destination_id: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        key = f"notification_destination:{destination_id}"
+        if not self.client.exists(key):
+            return None
+        self.client.hset(key, mapping={
+            "name": data.get("name", ""), "channel_id": data.get("channel_id", ""),
+            "type": data.get("type", ""), "target": json.dumps(data.get("target", {})),
+            "enabled": str(data.get("enabled", True)).lower(), "updated_at": datetime.utcnow().isoformat(),
+        })
+        return self.get_notification_destination(destination_id)
+
+    def destination_usage(self, destination_id: str) -> int:
+        return sum(
+            destination_id in (
+                rule.get("alert_destination_ids", [])
+                + rule.get("resolved_destination_ids", [])
+                + [item for items in rule.get("severity_destination_ids", {}).values() for item in items]
+            )
+            for rule in self.list_routing_rules()
+        )
+
+    def delete_notification_destination(self, destination_id: str) -> bool:
+        if self.destination_usage(destination_id):
+            return False
+        key = f"notification_destination:{destination_id}"
+        if not self.client.exists(key):
+            return False
+        self.client.delete(key)
+        self.client.srem("notification_destinations:index", destination_id)
+        return True
 
     # ========================
     # Users (Authentication)

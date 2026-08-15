@@ -3,7 +3,7 @@ Test Email API - Send test emails with routing preview.
 """
 from fastapi import APIRouter, Depends, HTTPException
 
-from auth import User, get_current_user
+from auth import User, get_current_user, require_operator
 from models import TestEmailRequest, TestEmailResponse, RoutingTestResponse
 from services.redis_service import get_redis_service
 from services.routing_service import get_routing_result
@@ -12,7 +12,7 @@ router = APIRouter(prefix="/test-email", tags=["test"])
 
 
 @router.post("", response_model=TestEmailResponse)
-async def send_test_email(request: TestEmailRequest, user: User = Depends(get_current_user)):
+async def send_test_email(request: TestEmailRequest, user: User = Depends(require_operator)):
     """
     Send a test email to the queue with routing preview.
 

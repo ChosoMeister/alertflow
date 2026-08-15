@@ -39,7 +39,13 @@ def find_matching_rule(
         r for r in rules
         if str(r.get("enabled", "true")).lower() == "true"
     ]
-    filtered_rules.sort(key=lambda r: int(r.get("priority", 0)))
+    # Stable ordering matters because rules are stored in a Redis set. Prefer
+    # explicit priority, then the more specific pattern, then a stable ID.
+    filtered_rules.sort(key=lambda r: (
+        int(r.get("priority", 0)),
+        -len(str(r.get("email_pattern", "")).replace("*", "").replace("?", "")),
+        str(r.get("id", "")),
+    ))
 
     for rule in filtered_rules:
         pattern = rule.get("email_pattern", "")
@@ -85,43 +91,48 @@ def get_routing_targets(
     matched_rule = find_matching_rule(sender_email, rules, recipient_emails or [])
 
     if matched_rule:
-        # Deserialize JSON fields if they are strings
-        nc_ids = matched_rule.get("notification_channel_ids", [])
-        if isinstance(nc_ids, str):
-            try:
-                import json
-                nc_ids = json.loads(nc_ids)
-            except:
-                nc_ids = []
+        def load_ids(field):
+            value = matched_rule.get(field, [])
+            if isinstance(value, str):
+                try:
+                    import json
+                    value = json.loads(value)
+                except Exception:
+                    value = []
+            return value or []
 
-        c_overrides = matched_rule.get("channel_overrides", {})
-        if isinstance(c_overrides, str):
+        severity_destinations = matched_rule.get("severity_destination_ids", {})
+        if isinstance(severity_destinations, str):
             try:
                 import json
-                c_overrides = json.loads(c_overrides)
-            except:
-                c_overrides = {}
+                severity_destinations = json.loads(severity_destinations)
+            except Exception:
+                severity_destinations = {}
 
         return {
             "matched_rule": matched_rule.get("name"),
-            "channel": matched_rule.get("channels", "telegram"),
-            # New fields for dynamic routing
-            "notification_channel_ids": nc_ids,
-            "channel_overrides": c_overrides,
-            "severity_matrix": matched_rule.get("severity_matrix", {}),
+            "matched_rule_id": matched_rule.get("id", "unknown"),
+            "channel": "destinations",
             "ai_provider_id": matched_rule.get("ai_provider_id"),
-            # Legacy fields (for backward compatibility)
-            "telegram_chat_id": matched_rule.get("telegram_chat_id", ""),
-            "telegram_thread_id": matched_rule.get("telegram_thread_id", "0"),
-            "matrix_room_id": matched_rule.get("matrix_room_id", ""),
+            "alert_destination_ids": load_ids("alert_destination_ids"),
+            "resolved_destination_ids": load_ids("resolved_destination_ids"),
+            "severity_destination_ids": severity_destinations or {},
+            "resolution_mode": matched_rule.get("resolution_mode", "legacy") or "legacy",
         }
     else:
         return {
             "matched_rule": None,
+            "matched_rule_id": "default",
             "channel": default_channel,
             "notification_channel_ids": [],
             "channel_overrides": {},
             "telegram_chat_id": default_tg_chat,
             "telegram_thread_id": default_tg_thread,
             "matrix_room_id": default_mx_room,
+            "resolution_profile_id": "",
+            "resolution_behavior": "legacy",
+            "delete_active_after_resolve": False,
+            "alert_destination_ids": [],
+            "resolved_destination_ids": [],
+            "resolution_mode": "legacy",
         }

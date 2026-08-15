@@ -17,7 +17,7 @@ async function apiRequest(endpoint: string, options: ApiOptions = {}) {
         'Content-Type': 'application/json',
     };
 
-    if (token) {
+    if (token && token !== 'cookie-session') {
         headers['Authorization'] = `Bearer ${token}`;
     }
 
@@ -25,6 +25,7 @@ async function apiRequest(endpoint: string, options: ApiOptions = {}) {
         method,
         headers,
         body: body ? JSON.stringify(body) : undefined,
+        credentials: 'include',
     });
 
     // Handle expired/invalid token — auto-redirect to login
@@ -57,16 +58,18 @@ export const api = {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: formData,
+            credentials: 'include',
         });
 
         if (!response.ok) throw new Error('Login failed');
         return response.json();
     },
-
+    logout: () => apiRequest('/auth/logout', { method: 'POST' }),
     // Health
     health: () => apiRequest('/health'),
     status: (token: string) => apiRequest('/status', { token }),
     metrics: (token: string) => apiRequest('/metrics', { token }),
+    observabilityHealth: (token: string) => apiRequest('/observability-health', { token }),
 
     // Alerts
     alerts: (token: string, params?: { limit?: number; offset?: number; status?: string; severity?: string; q?: string }) => {
@@ -79,6 +82,8 @@ export const api = {
         return apiRequest(`/alerts?${query}`, { token });
     },
     alert: (token: string, id: string) => apiRequest(`/alerts/${id}`, { token }),
+    alertTimeline: (token: string, id: string) => apiRequest(`/alerts/${id}/timeline`, { token }),
+    alertOperations: (token: string, id: string) => apiRequest(`/alerts/${id}/operations`, { token }),
     updateAlertStatus: (token: string, id: string, status: string) =>
         apiRequest(`/alerts/${id}/status?status=${status}`, { method: 'PATCH', token }),
     rerunAI: (token: string, id: string) => apiRequest(`/alerts/${id}/rerun-ai`, { method: 'POST', token }),
@@ -90,6 +95,10 @@ export const api = {
     createRoutingRule: (token: string, rule: any) => apiRequest('/routing-rules', { method: 'POST', body: rule, token }),
     updateRoutingRule: (token: string, id: string, rule: any) => apiRequest(`/routing-rules/${id}`, { method: 'PUT', body: rule, token }),
     deleteRoutingRule: (token: string, id: string) => apiRequest(`/routing-rules/${id}`, { method: 'DELETE', token }),
+    resolutionProfiles: (token: string) => apiRequest('/resolution-profiles', { token }),
+    createResolutionProfile: (token: string, profile: any) => apiRequest('/resolution-profiles', { method: 'POST', body: profile, token }),
+    updateResolutionProfile: (token: string, id: string, profile: any) => apiRequest(`/resolution-profiles/${id}`, { method: 'PUT', body: profile, token }),
+    deleteResolutionProfile: (token: string, id: string) => apiRequest(`/resolution-profiles/${id}`, { method: 'DELETE', token }),
     testRoutingMatch: (token: string, email: string, matchField: string = 'from') =>
         apiRequest('/routing-rules/test-match', { method: 'POST', body: { email_address: email, match_field: matchField }, token }),
 
@@ -105,6 +114,15 @@ export const api = {
         if (params?.limit) query.set('limit', params.limit.toString());
         if (params?.service) query.set('service', params.service);
         return apiRequest(`/logs?${query}`, { token });
+    },
+    searchLogs: (token: string, params?: { limit?: number; service?: string; level?: string; q?: string; sinceMinutes?: number }) => {
+        const query = new URLSearchParams();
+        if (params?.limit) query.set('limit', params.limit.toString());
+        if (params?.service) query.set('service', params.service);
+        if (params?.level) query.set('level', params.level);
+        if (params?.q) query.set('q', params.q);
+        if (params?.sinceMinutes) query.set('since_minutes', params.sinceMinutes.toString());
+        return apiRequest(`/logs/search?${query}`, { token });
     },
     relayLogs: (token: string, limit: number = 100) => apiRequest(`/logs/relay?limit=${limit}`, { token }),
 
@@ -136,6 +154,10 @@ export const api = {
     updateNotificationChannel: (token: string, id: string, channel: any) => apiRequest(`/notification-channels/${id}`, { method: 'PUT', body: channel, token }),
     deleteNotificationChannel: (token: string, id: string) => apiRequest(`/notification-channels/${id}`, { method: 'DELETE', token }),
     testNotificationChannel: (token: string, id: string) => apiRequest(`/notification-channels/${id}/test`, { method: 'POST', token }),
+    notificationDestinations: (token: string) => apiRequest('/notification-channels/destinations/list', { token }),
+    createNotificationDestination: (token: string, item: any) => apiRequest('/notification-channels/destinations', { method: 'POST', body: item, token }),
+    updateNotificationDestination: (token: string, id: string, item: any) => apiRequest(`/notification-channels/destinations/${id}`, { method: 'PUT', body: item, token }),
+    deleteNotificationDestination: (token: string, id: string) => apiRequest(`/notification-channels/destinations/${id}`, { method: 'DELETE', token }),
 
     // Settings
     getCurrentUser: (token: string) => apiRequest('/settings/me', { token }),

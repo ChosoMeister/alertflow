@@ -20,6 +20,7 @@ interface AIProvider {
     api_key?: string;
     timeout: number;
     is_default: boolean;
+    is_fallback: boolean;
 }
 
 export default function AIProvidersPage() {
@@ -42,6 +43,7 @@ export default function AIProvidersPage() {
         api_key: '',
         timeout: 120,
         is_default: false,
+        is_fallback: false,
     });
 
     useEffect(() => {
@@ -130,6 +132,7 @@ export default function AIProvidersPage() {
             api_key: '',
             timeout: 120,
             is_default: false,
+            is_fallback: false,
         });
     }
 
@@ -142,6 +145,7 @@ export default function AIProvidersPage() {
             api_key: provider.api_key || '',
             timeout: provider.timeout,
             is_default: provider.is_default,
+            is_fallback: provider.is_fallback,
         });
         setEditing(provider);
         setShowForm(true);
@@ -191,6 +195,7 @@ export default function AIProvidersPage() {
                                         >
                                             <option value="ollama">Ollama</option>
                                             <option value="openai">OpenAI</option>
+                                            <option value="vllm">vLLM</option>
                                             <option value="custom">Custom</option>
                                         </select>
                                     </div>
@@ -228,7 +233,7 @@ export default function AIProvidersPage() {
                                     </div>
                                 </div>
 
-                                {(formData.type === 'openai' || formData.type === 'custom') && (
+                                {(formData.type === 'openai' || formData.type === 'vllm' || formData.type === 'custom') && (
                                     <div>
                                         <label className="text-sm font-medium">{t('api_key')}</label>
                                         <Input
@@ -245,9 +250,19 @@ export default function AIProvidersPage() {
                                         type="checkbox"
                                         id="is_default"
                                         checked={formData.is_default}
-                                        onChange={e => setFormData({ ...formData, is_default: e.target.checked })}
+                                        onChange={e => setFormData({ ...formData, is_default: e.target.checked, is_fallback: e.target.checked ? false : formData.is_fallback })}
                                     />
                                     <label htmlFor="is_default" className="text-sm">{t('set_default')}</label>
+                                </div>
+
+                                <div className="flex items-center gap-2 mt-2">
+                                    <input
+                                        type="checkbox"
+                                        id="is_fallback"
+                                        checked={formData.is_fallback}
+                                        onChange={e => setFormData({ ...formData, is_fallback: e.target.checked, is_default: e.target.checked ? false : formData.is_default })}
+                                    />
+                                    <label htmlFor="is_fallback" className="text-sm">{t('set_fallback')}</label>
                                 </div>
 
                                 <div className="flex gap-2 pt-2">
@@ -268,7 +283,7 @@ export default function AIProvidersPage() {
                         </Card>
                     ) : (
                         providers.map(provider => (
-                            <Card key={provider.id} className={provider.is_default ? 'border-primary' : ''}>
+                            <Card key={provider.id} className={provider.is_default || provider.is_fallback ? 'border-primary' : ''}>
                                 <CardContent className="p-4">
                                     <div className="flex justify-between items-start">
                                         <div className="flex items-start gap-3">
@@ -280,6 +295,9 @@ export default function AIProvidersPage() {
                                                     <h3 className="font-semibold">{provider.name}</h3>
                                                     {provider.is_default && (
                                                         <span className="text-xs bg-primary/20 text-primary px-2 py-0.5 rounded">{t('default_badge')}</span>
+                                                    )}
+                                                    {provider.is_fallback && (
+                                                        <span className="text-xs bg-amber-500/20 text-amber-700 dark:text-amber-300 px-2 py-0.5 rounded">{t('fallback_badge')}</span>
                                                     )}
                                                 </div>
                                                 <p className="text-sm text-muted-foreground">{provider.type} • {provider.model}</p>

@@ -10,18 +10,21 @@ class RoutingRuleCreate(BaseModel):
     priority: int = Field(default=0, ge=0, le=1000)
     match_field: Literal["from", "to"] = "from"
     email_pattern: str = Field(..., min_length=1)  # Glob pattern: *@domain.tld, prefix-*@corp.com
-    telegram_chat_id: str = ""
-    telegram_thread_id: str = "0"
-    matrix_room_id: str = ""
-    channels: Literal["telegram", "matrix", "both", "dynamic"] = "telegram"
     notes: str = ""
-    # New extensible fields
     ai_provider_id: Optional[str] = None  # If None, use default provider
-    notification_channel_ids: List[str] = []  # If empty, use legacy channels field
-    # Per-channel overrides: {"channel_id": {"chat_id": "...", "thread_id": "...", "room_id": "..."}}
-    channel_overrides: dict = {}
-    # Severity-based routing: {"critical": ["telegram:chat_id_1"], "high": ["webhook:url"]}
-    severity_matrix: dict = {}
+    alert_destination_ids: List[str] = Field(default_factory=list)
+    resolved_destination_ids: List[str] = Field(default_factory=list)
+    severity_destination_ids: dict[str, List[str]] = Field(default_factory=dict)
+    resolution_mode: Literal["legacy", "copy", "move"] = "legacy"
+
+
+class ResolutionProfileCreate(BaseModel):
+    """Reusable resolved-incident destination profile."""
+    name: str = Field(..., min_length=1, max_length=100)
+    enabled: bool = True
+    notification_channel_ids: List[str] = Field(default_factory=list)
+    channel_overrides: dict = Field(default_factory=dict)
+    notes: str = ""
 
 
 class RoutingRule(RoutingRuleCreate):
@@ -132,3 +135,8 @@ class GeneralSettings(BaseModel):
     summary_telegram_chat_id: str = ""
     summary_telegram_thread_id: str = "0"
     summary_telegram_bot_token: str = ""
+    summary_telegram_bot_token_configured: bool = False
+    global_storm_max_notifications: int = Field(default=20, ge=5, le=500)
+    global_storm_window_seconds: int = Field(default=300, ge=60, le=3600)
+    storm_summary_interval_seconds: int = Field(default=300, ge=30, le=3600)
+    incident_sla_minutes: int = Field(default=60, ge=5, le=10080)

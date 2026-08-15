@@ -1,0 +1,41 @@
+discovery.docker "alertflow" {
+	host             = "unix:///var/run/docker.sock"
+	refresh_interval = "5s"
+
+	filter {
+		name   = "name"
+		values = ["alertflow-api", "alertflow-processor", "alertflow-smtp", "alertflow-ui", "alertflow-redis"]
+	}
+}
+
+discovery.relabel "alertflow" {
+	targets = discovery.docker.alertflow.targets
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "/(.*)"
+		target_label  = "container"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_log_stream"]
+		target_label  = "stream"
+	}
+
+	rule {
+		replacement  = "alertflow"
+		target_label = "job"
+	}
+}
+
+loki.source.docker "alertflow" {
+	host       = "unix:///var/run/docker.sock"
+	targets    = discovery.relabel.alertflow.output
+	forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}

@@ -13,7 +13,7 @@ services:
       --auto-aof-rewrite-percentage 100
       --auto-aof-rewrite-min-size 32mb
       --maxmemory 512mb
-      --maxmemory-policy allkeys-lru
+      --maxmemory-policy noeviction
       --requirepass ${REDIS_PASSWORD}
     healthcheck:
       test: [ "CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping" ]
@@ -26,6 +26,7 @@ services:
 
   # SMTP Ingestor - Receives emails and queues them
   smtp-ingestor:
+    image: alertflow-smtp-ingestor:${ALERTFLOW_GIT_COMMIT:-dev}
     build:
       context: ./services/smtp-ingestor
       dockerfile: Dockerfile
@@ -49,16 +50,22 @@ services:
 
   # Alert Processor - AI Analysis and Notification Dispatch
   alert-processor:
+    image: alertflow-alert-processor:${ALERTFLOW_GIT_COMMIT:-dev}
     build:
       context: ./services/alert-processor
       dockerfile: Dockerfile
     container_name: alertflow-processor
+    labels:
+      com.alertflow.release: ${ALERTFLOW_RELEASE:-unknown}
+      com.alertflow.commit: ${ALERTFLOW_GIT_COMMIT:-unknown}
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-gpt-oss:120b}
+      - AI_MAX_PROVIDER_ATTEMPTS=${AI_MAX_PROVIDER_ATTEMPTS:-3}
+      - AI_BODY_MAX_CHARS=${AI_BODY_MAX_CHARS:-2500}
       - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-true}
       - TELEGRAM_DEFAULT_CHAT_ID=${TELEGRAM_DEFAULT_CHAT_ID}
       - TELEGRAM_DEFAULT_THREAD_ID=${TELEGRAM_DEFAULT_THREAD_ID:-0}
@@ -67,20 +74,51 @@ services:
       - DEFAULT_NOTIFICATION_CHANNEL=${DEFAULT_NOTIFICATION_CHANNEL:-both}
       - FAILOVER_ENABLED=${FAILOVER_ENABLED:-true}
       - MESSAGE_VERBOSITY=${MESSAGE_VERBOSITY:-standard}
+      - LOKI_URL=${LOKI_URL:-http://loki:3100}
+      - ALLOY_URL=${ALLOY_URL:-http://alloy:12345}
+      - LOKI_DATA_PATH=/observability/loki
+      - DISK_WARNING_PERCENT=${DISK_WARNING_PERCENT:-70}
+      - DISK_CRITICAL_PERCENT=${DISK_CRITICAL_PERCENT:-85}
+      - LOKI_GROWTH_WARNING_MB_PER_HOUR=${LOKI_GROWTH_WARNING_MB_PER_HOUR:-250}
+      - ALERT_STORM_WINDOW_SECONDS=${ALERT_STORM_WINDOW_SECONDS:-300}
+      - ALERT_STORM_THRESHOLD=${ALERT_STORM_THRESHOLD:-5}
+      - ALERT_STORM_COOLDOWN_SECONDS=${ALERT_STORM_COOLDOWN_SECONDS:-300}
+      - GLOBAL_STORM_MAX_NOTIFICATIONS=${GLOBAL_STORM_MAX_NOTIFICATIONS:-20}
+      - GLOBAL_STORM_WINDOW_SECONDS=${GLOBAL_STORM_WINDOW_SECONDS:-300}
+      - STORM_SUMMARY_INTERVAL_SECONDS=${STORM_SUMMARY_INTERVAL_SECONDS:-300}
+      - INCIDENT_SLA_MINUTES=${INCIDENT_SLA_MINUTES:-60}
+      - INCIDENT_RETENTION_DAYS=${INCIDENT_RETENTION_DAYS:-7}
+      - DLQ_RETENTION_DAYS=${DLQ_RETENTION_DAYS:-7}
+      - DLQ_MAX_ITEMS=${DLQ_MAX_ITEMS:-1000}
+      - DISK_MONITOR_PATH=/host-disk
       - USE_TELEGRAM_PROXY=${USE_TELEGRAM_PROXY:-false}
       - TELEGRAM_PROXY_BASE_URL=${TELEGRAM_PROXY_BASE_URL:-}
+      - TELEGRAM_CIRCUIT_THRESHOLD=${TELEGRAM_CIRCUIT_THRESHOLD:-5}
+      - TELEGRAM_CIRCUIT_WINDOW_SECONDS=${TELEGRAM_CIRCUIT_WINDOW_SECONDS:-60}
+      - TELEGRAM_CIRCUIT_OPEN_SECONDS=${TELEGRAM_CIRCUIT_OPEN_SECONDS:-120}
+      - FALLBACK_CANARY_INTERVAL_SECONDS=${FALLBACK_CANARY_INTERVAL_SECONDS:-21600}
       - TZ=Asia/Tehran
     depends_on:
       redis:
         condition: service_healthy
+    volumes:
+      - loki_data:/observability/loki:ro
+      - type: bind
+        source: ${HOST_DISK_MONITOR_PATH:-.}
+        target: /host-disk
+        read_only: true
     restart: unless-stopped
 
   # API Server - REST API for Web Console
   api-server:
+    image: alertflow-api-server:${ALERTFLOW_GIT_COMMIT:-dev}
     build:
       context: ./services/api-server
       dockerfile: Dockerfile
     container_name: alertflow-api
+    labels:
+      com.alertflow.release: ${ALERTFLOW_RELEASE:-unknown}
+      com.alertflow.commit: ${ALERTFLOW_GIT_COMMIT:-unknown}
     ports:
       - "8000:8000"
     environment:
@@ -98,6 +136,8 @@ services:
       - DEFAULT_NOTIFICATION_CHANNEL=${DEFAULT_NOTIFICATION_CHANNEL:-both}
       - WEBHOOK_AUTH_TOKEN=${WEBHOOK_AUTH_TOKEN}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - COOKIE_SECURE=${COOKIE_SECURE:-true}
+      - LOKI_URL=${LOKI_URL:-http://loki:3100}
       - TZ=Asia/Tehran
     depends_on:
       redis:
@@ -106,12 +146,16 @@ services:
 
   # Web UI - Next.js Dashboard
   web-ui:
+    image: alertflow-web-ui:${ALERTFLOW_GIT_COMMIT:-dev}
     build:
       context: ./web-ui
       dockerfile: Dockerfile
       args:
         - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     container_name: alertflow-ui
+    labels:
+      com.alertflow.release: ${ALERTFLOW_RELEASE:-unknown}
+      com.alertflow.commit: ${ALERTFLOW_GIT_COMMIT:-unknown}
     ports:
       - "3000:3000"
     environment:
@@ -121,5 +165,58 @@ services:
       - api-server
     restart: unless-stopped
 
+  # Loki - short-retention local log store (internal access only)
+  loki:
+    image: grafana/loki:3.5.3
+    container_name: alertflow-loki
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    user: "10001:10001"
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./observability/loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m
+    cap_drop:
+      - ALL
+    mem_limit: 384m
+    cpus: 0.75
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  # Alloy - collect logs only from AlertFlow application containers
+  alloy:
+    image: grafana/alloy:v1.10.2
+    container_name: alertflow-alloy
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    user: "0"
+    volumes:
+      - ./observability/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy_data:/var/lib/alloy
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m
+    cap_drop:
+      - ALL
+    mem_limit: 192m
+    cpus: 0.35
+    depends_on:
+      loki:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   redis_data:
+  loki_data:
+  alloy_data:

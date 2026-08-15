@@ -5,7 +5,7 @@ import logging
 import os
 from datetime import timedelta
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 
@@ -43,10 +43,11 @@ app = FastAPI(
 
 # CORS middleware
 cors_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",")]
+cors_allows_credentials = "*" not in cors_origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_credentials=True,
+    allow_credentials=cors_allows_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -54,6 +55,7 @@ app.add_middleware(
 # Include routers
 app.include_router(health.router, prefix="/api")
 app.include_router(routing.router, prefix="/api")
+app.include_router(routing.profiles_router, prefix="/api")
 app.include_router(test_email.router, prefix="/api")
 app.include_router(alerts.router, prefix="/api")
 app.include_router(logs.router, prefix="/api")
@@ -67,7 +69,7 @@ app.include_router(settings_routes.router)  # settings has its own prefix
 
 
 @app.post("/api/auth/login")
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+async def login(response: Response, form_data: OAuth2PasswordRequestForm = Depends()):
     """Authenticate user and return JWT token."""
     user = authenticate_user(form_data.username, form_data.password)
     if not user:
@@ -84,6 +86,17 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
     logger.info(f"User logged in: {user['username']}")
 
+    cookie_secure = os.getenv("COOKIE_SECURE", "true").lower() in {"1", "true", "yes", "on"}
+    response.set_cookie(
+        key="alertflow_session",
+        value=access_token,
+        httponly=True,
+        secure=cookie_secure,
+        samesite="lax",
+        max_age=settings.jwt_expire_minutes * 60,
+        path="/",
+    )
+
     return {
         "access_token": access_token,
         "token_type": "bearer",
@@ -92,6 +105,18 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
             "role": user["role"]
         }
     }
+
+
+@app.post("/api/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(response: Response):
+    """Expire the browser session cookie. Bearer clients remain stateless."""
+    response.delete_cookie(
+        key="alertflow_session",
+        path="/",
+        httponly=True,
+        secure=os.getenv("COOKIE_SECURE", "true").lower() in {"1", "true", "yes", "on"},
+        samesite="lax",
+    )
 
 
 @app.get("/api/auth/me")

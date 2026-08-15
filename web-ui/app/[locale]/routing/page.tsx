@@ -28,9 +28,16 @@ interface RoutingRule {
     notification_channel_ids: string[];
     channel_overrides: Record<string, ChannelOverride>;
     severity_matrix: Record<string, { channels: string[], channel_overrides: Record<string, ChannelOverride> }>;
+    severity_destination_ids?: Record<string, string[]>;
     ai_provider_id?: string;
+    resolution_profile_id?: string;
+    resolution_behavior?: 'legacy' | 'archive' | 'archive_and_remove';
+    delete_active_after_resolve?: boolean;
     notes: string;
     created_at: string;
+    alert_destination_ids?: string[];
+    resolved_destination_ids?: string[];
+    resolution_mode?: 'legacy' | 'copy' | 'move';
 }
 
 interface ChannelOverride {
@@ -54,6 +61,18 @@ interface AIProvider {
     type: string;
 }
 
+interface ResolutionProfile {
+    id: string;
+    name: string;
+    enabled: boolean;
+    notification_channel_ids: string[];
+    channel_overrides: Record<string, ChannelOverride>;
+    notes: string;
+    rule_count: number;
+}
+
+interface NotificationDestination { id: string; name: string; channel_id: string; type: string; target: Record<string,string>; enabled: boolean; }
+
 export default function RoutingPage() {
     const router = useRouter();
     const t = useTranslations('Routing');
@@ -74,6 +93,16 @@ export default function RoutingPage() {
     const [priority, setPriority] = useState('0');
     const [adding, setAdding] = useState(false);
     const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
+    const [resolutionProfileId, setResolutionProfileId] = useState('');
+    const [removeActiveOnResolve, setRemoveActiveOnResolve] = useState(false);
+    const [profileName, setProfileName] = useState('');
+    const [profileChannelIds, setProfileChannelIds] = useState<string[]>([]);
+    const [profileOverridesJson, setProfileOverridesJson] = useState('{}');
+    const [savingProfile, setSavingProfile] = useState(false);
+    const [alertDestinationIds, setAlertDestinationIds] = useState<string[]>([]);
+    const [resolvedDestinationIds, setResolvedDestinationIds] = useState<string[]>([]);
+    const [resolutionMode, setResolutionMode] = useState<'legacy'|'copy'|'move'>('legacy');
+    const [severityDestinationIds, setSeverityDestinationIds] = useState<Record<string, string[]>>({});
 
     // Test match state
     const [testEmail, setTestEmail] = useState('');
@@ -92,6 +121,8 @@ export default function RoutingPage() {
         if (url === '/api/routing-rules') return api.routingRules(authToken);
         if (url === '/api/notification-channels') return api.notificationChannels(authToken);
         if (url === '/api/ai-providers') return api.aiProviders(authToken);
+        if (url === '/api/resolution-profiles') return api.resolutionProfiles(authToken);
+        if (url === '/api/notification-destinations') return api.notificationDestinations(authToken);
     };
 
     const { data: fetchedRules, isLoading: rulesLoading, mutate: mutateRules } = useSWR<RoutingRule[]>(
@@ -103,10 +134,18 @@ export default function RoutingPage() {
     const { data: fetchedAiProviders, isLoading: aiProvidersLoading } = useSWR<AIProvider[]>(
         token ? ['/api/ai-providers', token] : null, fetcher
     );
+    const { data: fetchedProfiles, mutate: mutateProfiles } = useSWR<ResolutionProfile[]>(
+        token ? ['/api/resolution-profiles', token] : null, fetcher
+    );
+    const { data: fetchedDestinations } = useSWR<NotificationDestination[]>(
+        token ? ['/api/notification-destinations', token] : null, fetcher
+    );
 
     const rules: RoutingRule[] = fetchedRules || [];
     const channels: NotificationChannel[] = fetchedChannels || [];
     const aiProviders: AIProvider[] = fetchedAiProviders || [];
+    const resolutionProfiles: ResolutionProfile[] = fetchedProfiles || [];
+    const destinations: NotificationDestination[] = fetchedDestinations || [];
 
     function toggleChannel(channelId: string) {
         setSelectedChannelIds(prev => {
@@ -213,6 +252,10 @@ export default function RoutingPage() {
         setExpandedChannels(new Set());
         setPriority('0');
         setEditingRuleId(null);
+        setResolutionProfileId('');
+        setRemoveActiveOnResolve(false);
+        setAlertDestinationIds([]); setResolvedDestinationIds([]); setResolutionMode('legacy');
+        setSeverityDestinationIds({});
     }
 
     function startEditing(rule: RoutingRule) {
@@ -238,6 +281,12 @@ export default function RoutingPage() {
         setSeverityMatrix(normalisedMatrix);
         setSelectedAiProviderId(rule.ai_provider_id || '');
         setEditingRuleId(rule.id);
+        setResolutionProfileId(rule.resolution_profile_id || '');
+        setRemoveActiveOnResolve(rule.resolution_behavior === 'archive_and_remove' || !!rule.delete_active_after_resolve);
+        setAlertDestinationIds(rule.alert_destination_ids || []);
+        setResolvedDestinationIds(rule.resolved_destination_ids || []);
+        setResolutionMode(rule.resolution_mode || 'legacy');
+        setSeverityDestinationIds(rule.severity_destination_ids || {});
 
         // Auto-expand channels with overrides
         const channelsWithOverrides = new Set<string>();
@@ -251,23 +300,20 @@ export default function RoutingPage() {
     }
 
     async function saveRule() {
-        if (!name || !pattern || selectedChannelIds.length === 0) return;
+        if (!name || !pattern || alertDestinationIds.length === 0) return;
         setAdding(true);
 
         const ruleData = {
             name,
             email_pattern: pattern,
             match_field: matchField,
-            notification_channel_ids: selectedChannelIds,
-            channel_overrides: channelOverrides,
-            severity_matrix: severityMatrix,
-            channels: 'dynamic',
             ai_provider_id: selectedAiProviderId || null,
-            telegram_chat_id: '',
-            telegram_thread_id: '0',
-            matrix_room_id: '',
             priority: parseInt(priority) || 0,
             enabled: true
+            ,alert_destination_ids: alertDestinationIds
+            ,resolved_destination_ids: resolvedDestinationIds
+            ,severity_destination_ids: severityDestinationIds
+            ,resolution_mode: resolvedDestinationIds.length ? resolutionMode : 'legacy'
         };
 
         try {
@@ -306,6 +352,29 @@ export default function RoutingPage() {
         } catch (e) {
             console.error(e);
         }
+    }
+
+    async function createProfile() {
+        if (!profileName || profileChannelIds.length === 0) return;
+        setSavingProfile(true);
+        try {
+            const overrides = JSON.parse(profileOverridesJson || '{}');
+            await api.createResolutionProfile(token!, {
+                name: profileName, enabled: true, notification_channel_ids: profileChannelIds,
+                channel_overrides: overrides, notes: ''
+            });
+            setProfileName(''); setProfileChannelIds([]); setProfileOverridesJson('{}');
+            mutateProfiles();
+            toast({ title: c('success'), description: 'Resolution profile created' });
+        } catch (e: any) {
+            toast({ title: c('error'), description: e.message || 'Invalid overrides JSON', variant: 'destructive' });
+        } finally { setSavingProfile(false); }
+    }
+
+    async function deleteProfile(id: string) {
+        if (!confirm('Delete this resolution profile?')) return;
+        try { await api.deleteResolutionProfile(token!, id); mutateProfiles(); }
+        catch (e: any) { toast({ title: c('error'), description: e.message, variant: 'destructive' }); }
     }
 
     function getChannelIcon(type: string) {
@@ -409,10 +478,32 @@ export default function RoutingPage() {
                                 </div>
                             </div>
 
+                            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                                <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 space-y-3">
+                                    <div><p className="font-semibold">Alert destinations</p><p className="text-xs text-muted-foreground">Active incidents are sent or updated in every selected endpoint.</p></div>
+                                    <div className="space-y-2 max-h-60 overflow-y-auto">
+                                        {destinations.map(item => <label key={item.id} className={`flex items-start gap-3 rounded-lg border p-3 cursor-pointer ${alertDestinationIds.includes(item.id) ? 'border-amber-400 bg-amber-500/10' : 'border-border'}`}>
+                                            <input type="checkbox" className="mt-1" checked={alertDestinationIds.includes(item.id)} onChange={() => setAlertDestinationIds(prev => prev.includes(item.id) ? prev.filter(x => x !== item.id) : [...prev,item.id])} />
+                                            <span>{getChannelIcon(item.type)}</span><span><span className="block text-sm font-medium">{item.name}</span><span className="block text-xs text-muted-foreground">{item.type === 'telegram' ? `${item.target.chat_id}${item.target.thread_id && item.target.thread_id !== '0' ? ` / thread ${item.target.thread_id}` : ''}` : item.target.room_id || item.target.url || item.target.receptor}</span></span>
+                                        </label>)}
+                                    </div>
+                                </div>
+                                <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-3">
+                                    <div><p className="font-semibold">Resolved destinations</p><p className="text-xs text-muted-foreground">Select Telegram, Matrix or multiple endpoints for the completed incident card.</p></div>
+                                    <select value={resolutionMode} onChange={e => setResolutionMode(e.target.value as 'legacy'|'copy'|'move')} className="w-full h-10 px-3 rounded-md border bg-background text-sm">
+                                        <option value="legacy">Keep in place (legacy)</option><option value="copy">Copy to resolved destinations</option><option value="move">Move after all resolved deliveries succeed</option>
+                                    </select>
+                                    {resolutionMode !== 'legacy' && <div className="space-y-2 max-h-60 overflow-y-auto">{destinations.map(item => <label key={item.id} className={`flex items-start gap-3 rounded-lg border p-3 cursor-pointer ${resolvedDestinationIds.includes(item.id) ? 'border-emerald-400 bg-emerald-500/10' : 'border-border'}`}>
+                                        <input type="checkbox" className="mt-1" checked={resolvedDestinationIds.includes(item.id)} onChange={() => setResolvedDestinationIds(prev => prev.includes(item.id) ? prev.filter(x => x !== item.id) : [...prev,item.id])} />
+                                        <span>{getChannelIcon(item.type)}</span><span><span className="block text-sm font-medium">{item.name}</span><span className="block text-xs text-muted-foreground">{item.type === 'telegram' ? `${item.target.chat_id}${item.target.thread_id && item.target.thread_id !== '0' ? ` / thread ${item.target.thread_id}` : ''}` : item.target.room_id || item.target.url || item.target.receptor}</span></span>
+                                    </label>)}</div>}
+                                </div>
+                            </div>
+
                             {/* Dynamic Notification Channels Selection with Override Settings */}
-                            <div className="space-y-2">
+                            <div className="hidden" aria-hidden="true">
                                 <label className="text-sm font-medium">
-                                    {t('channels')} ({selectedChannelIds.length} {t('channels_selected')})
+                                    Legacy connector compatibility and severity overrides ({selectedChannelIds.length} selected)
                                 </label>
                                 {channelsLoading ? (
                                     <div className="space-y-2">
@@ -544,8 +635,46 @@ export default function RoutingPage() {
                                 )}
                             </div>
 
-                            {/* Severity Overrides */}
                             <div className="space-y-4 pt-4 border-t border-border">
+                                <div>
+                                    <label className="text-sm font-medium">Severity destinations (Optional)</label>
+                                    <p className="text-xs text-muted-foreground">A configured severity replaces the default Alert destinations. Empty severities inherit the default destinations.</p>
+                                </div>
+                                <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                                    {['critical', 'high', 'medium', 'low', 'info'].map(severity => {
+                                        const enabled = Object.prototype.hasOwnProperty.call(severityDestinationIds, severity);
+                                        const selected = severityDestinationIds[severity] || [];
+                                        return <div key={severity} className={`rounded-lg border p-3 space-y-2 ${enabled ? 'border-primary/50 bg-primary/5' : 'border-border bg-muted/20'}`}>
+                                            <label className="flex items-center justify-between gap-3 cursor-pointer">
+                                                <span className="flex items-center gap-2">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={enabled}
+                                                        onChange={() => setSeverityDestinationIds(prev => {
+                                                            const next = { ...prev };
+                                                            if (enabled) delete next[severity];
+                                                            else next[severity] = [];
+                                                            return next;
+                                                        })}
+                                                    />
+                                                    <span className="text-xs font-bold uppercase tracking-wider">{severity}</span>
+                                                </span>
+                                                <span className="text-xs text-muted-foreground">{enabled ? `${selected.length} selected` : 'Inherit default'}</span>
+                                            </label>
+                                            {enabled && <div className="max-h-48 overflow-y-auto space-y-1 pt-2 border-t border-border">
+                                                {destinations.map(item => <label key={item.id} className={`flex items-center gap-2 rounded border p-2 cursor-pointer ${selected.includes(item.id) ? 'border-primary bg-primary/10' : 'border-border'}`}>
+                                                    <input type="checkbox" checked={selected.includes(item.id)} onChange={() => setSeverityDestinationIds(prev => ({...prev, [severity]: selected.includes(item.id) ? selected.filter(id => id !== item.id) : [...selected, item.id]}))} />
+                                                    {getChannelIcon(item.type)}<span className="text-xs truncate">{item.name}</span>
+                                                </label>)}
+                                                {selected.length === 0 && <p className="text-xs text-amber-500 py-1">Select at least one destination, or turn this severity off to inherit defaults.</p>}
+                                            </div>}
+                                        </div>;
+                                    })}
+                                </div>
+                            </div>
+
+                            {/* Removed connector-based severity editor; retained in source for one release only, never rendered. */}
+                            <div className="hidden" aria-hidden="true">
                                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                                     <div>
                                         <label className="text-sm font-medium">Severity Overrides (Optional)</label>
@@ -672,7 +801,7 @@ export default function RoutingPage() {
                             </div>
 
                             <div className="flex gap-2">
-                                <Button className="flex-1" onClick={saveRule} disabled={adding || !name || !pattern || selectedChannelIds.length === 0}>
+                                <Button className="flex-1" onClick={saveRule} disabled={adding || !name || !pattern || alertDestinationIds.length === 0 || (resolutionMode !== 'legacy' && resolvedDestinationIds.length === 0)}>
                                     {adding ? 'Saving...' : (editingRuleId ? 'Update Rule' : 'Add Rule')}
                                 </Button>
                                 {editingRuleId && (
@@ -811,6 +940,11 @@ export default function RoutingPage() {
                                                                     AI: {providerName}
                                                                 </span>
                                                             )}
+                                                            <span className={`text-[10px] px-1.5 py-0.5 rounded border ${rule.resolution_mode && rule.resolution_mode !== 'legacy' ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-muted text-muted-foreground border-border'}`}>
+                                                                {rule.resolution_mode && rule.resolution_mode !== 'legacy'
+                                                                    ? `Resolve: ${rule.resolution_mode} → ${(rule.resolved_destination_ids || []).length} endpoint(s)`
+                                                                    : 'Resolve: legacy'}
+                                                            </span>
                                                         </div>
                                                         <p className="text-sm text-muted-foreground font-mono">
                                                             {rule.match_field.toUpperCase()}: {rule.email_pattern}

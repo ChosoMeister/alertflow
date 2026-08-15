@@ -8,7 +8,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
 import { formatDate, severityColor, statusColor } from '@/lib/utils';
-import { ArrowLeft, RefreshCcw, Send, Brain, Check, Clock } from 'lucide-react';
+import { ArrowLeft, RefreshCcw, Send, Brain, Check, Clock, Activity } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
 export default function AlertDetailPage() {
@@ -18,6 +18,7 @@ export default function AlertDetailPage() {
     const { toast } = useToast();
     const [token, setToken] = useState<string | null>(null);
     const [alert, setAlert] = useState<any>(null);
+    const [timeline, setTimeline] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
@@ -35,8 +36,11 @@ export default function AlertDetailPage() {
 
     async function loadAlert() {
         try {
-            const data = await api.alert(token!, alertId);
+            const [data, timelineData] = await Promise.all([
+                api.alert(token!, alertId), api.alertTimeline(token!, alertId),
+            ]);
             setAlert(data);
+            setTimeline(timelineData.events || []);
         } catch (e) {
             console.error(e);
         } finally {
@@ -211,6 +215,27 @@ export default function AlertDetailPage() {
 
                                 <Card>
                                     <CardHeader>
+                                        <CardTitle>Channel Delivery</CardTitle>
+                                    </CardHeader>
+                                    <CardContent className="space-y-3">
+                                        {Object.keys(alert.delivery || {}).length === 0 ? (
+                                            <p className="text-sm text-muted-foreground">No delivery state recorded</p>
+                                        ) : Object.entries(alert.delivery).map(([channelId, raw]: [string, any]) => (
+                                            <div key={channelId} className="rounded border p-2">
+                                                <div className="flex items-center justify-between gap-2">
+                                                    <span className="font-mono text-xs break-all">{channelId}</span>
+                                                    <span className={`text-xs font-medium ${raw.status === 'delivered' ? 'text-green-400' : 'text-red-400'}`}>
+                                                        {raw.status}
+                                                    </span>
+                                                </div>
+                                                <p className="mt-1 text-xs text-muted-foreground">Attempt {raw.attempt || 1} · {raw.detail || '-'}</p>
+                                            </div>
+                                        ))}
+                                    </CardContent>
+                                </Card>
+
+                                <Card>
+                                    <CardHeader>
                                         <CardTitle>Incident Correlation</CardTitle>
                                     </CardHeader>
                                     <CardContent className="space-y-3">
@@ -234,6 +259,29 @@ export default function AlertDetailPage() {
                                 </Card>
                             </div>
                         </div>
+
+                        <Card>
+                            <CardHeader>
+                                <CardTitle className="flex items-center gap-2"><Activity className="h-5 w-5" />Incident Timeline</CardTitle>
+                            </CardHeader>
+                            <CardContent>
+                                {timeline.length === 0 ? <p className="text-sm text-muted-foreground">No events recorded</p> : (
+                                    <div className="space-y-3">
+                                        {timeline.map((event: any, idx: number) => (
+                                            <div key={`${event.id || event.occurred_at}-${idx}`} className="grid grid-cols-[10rem_7rem_1fr] gap-3 rounded border p-3 text-sm">
+                                                <span className="text-muted-foreground">{event.occurred_at ? formatDate(event.occurred_at) : '-'}</span>
+                                                <span className="font-medium">{event.type || event.action}</span>
+                                                <div className="min-w-0">
+                                                    <span className="break-words">{event.detail || event.status || '-'}</span>
+                                                    {event.actor && <span className="ml-2 text-muted-foreground">by {event.actor}</span>}
+                                                    {event.channel_id && <span className="ml-2 font-mono text-xs text-muted-foreground">{event.channel_id}</span>}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </CardContent>
+                        </Card>
 
                         {/* Action History Log */}
                         {alert.action_history && (() => {

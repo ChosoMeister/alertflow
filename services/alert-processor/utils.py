@@ -3,10 +3,85 @@ Utility functions for alert processor.
 """
 import os
 import logging
+import re
+import time
 import requests
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger("Alert-Processor")
+
+_SECRET_PATTERNS = (
+    (re.compile(r"/bot[^/\s]+/", re.IGNORECASE), "/bot[REDACTED]/"),
+    (re.compile(r"(?i)(authorization:\s*bearer\s+)[^\s,}]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)(access_token|bot_token|api_key|password)([\"'=:\s]+)[^\s,}\"]+"), r"\1\2[REDACTED]"),
+)
+
+
+def redact_secrets(value) -> str:
+    """Remove credentials from provider errors before they enter Docker/Loki logs."""
+    text = str(value)
+    for pattern, replacement in _SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _telegram_plain_text(text: str) -> str:
+    """Produce a readable fallback when Telegram rejects MarkdownV2 entities."""
+    value = re.sub(r"\\([_*\[\]()~`>#+\-=|{}.!])", r"\1", str(text or ""))
+    return value.replace("*", "").replace("_", "").replace("`", "")
+
+
+_telegram_network_failures = []
+_telegram_circuit_open_until = 0.0
+TELEGRAM_CIRCUIT_THRESHOLD = int(os.getenv("TELEGRAM_CIRCUIT_THRESHOLD", "5"))
+TELEGRAM_CIRCUIT_WINDOW_SECONDS = int(os.getenv("TELEGRAM_CIRCUIT_WINDOW_SECONDS", "60"))
+TELEGRAM_CIRCUIT_OPEN_SECONDS = int(os.getenv("TELEGRAM_CIRCUIT_OPEN_SECONDS", "120"))
+
+
+def _telegram_circuit_allows_request() -> bool:
+    return time.time() >= _telegram_circuit_open_until
+
+
+def _record_telegram_network_result(success: bool):
+    global _telegram_network_failures, _telegram_circuit_open_until
+    now = time.time()
+    if success:
+        _telegram_network_failures = []
+        _telegram_circuit_open_until = 0.0
+        return
+    cutoff = now - TELEGRAM_CIRCUIT_WINDOW_SECONDS
+    _telegram_network_failures = [item for item in _telegram_network_failures if item >= cutoff]
+    _telegram_network_failures.append(now)
+    if len(_telegram_network_failures) >= TELEGRAM_CIRCUIT_THRESHOLD:
+        _telegram_circuit_open_until = now + TELEGRAM_CIRCUIT_OPEN_SECONDS
+        logger.warning("Telegram circuit opened for %ss after repeated network failures", TELEGRAM_CIRCUIT_OPEN_SECONDS)
+
+
+def _telegram_post(url: str, payload: dict, timeout: int, proxies=None):
+    """POST with MarkdownV2 fallback and credential-safe diagnostics."""
+    if not _telegram_circuit_allows_request():
+        logger.warning("Telegram request skipped while network circuit is open")
+        return None
+    try:
+        response = requests.post(url, json=payload, timeout=timeout, proxies=proxies)
+        _record_telegram_network_result(True)
+    except requests.exceptions.RequestException as exc:
+        _record_telegram_network_result(False)
+        logger.error("Telegram network request failed: %s", redact_secrets(exc))
+        return None
+    if response.status_code == 400 and "can't parse entities" in response.text.lower():
+        fallback = dict(payload)
+        fallback.pop("parse_mode", None)
+        fallback["text"] = _telegram_plain_text(payload.get("text", ""))
+        logger.warning("Telegram rejected MarkdownV2; retrying once as plain text")
+        try:
+            response = requests.post(url, json=fallback, timeout=timeout, proxies=proxies)
+            _record_telegram_network_result(True)
+        except requests.exceptions.RequestException as exc:
+            _record_telegram_network_result(False)
+            logger.error("Telegram plain-text fallback failed: %s", redact_secrets(exc))
+            return None
+    return response
 
 # Telegram Config
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -63,7 +138,9 @@ def send_telegram(chat_id: str, thread_id: int, text: str, bot_token: str = None
         if thread_id and int(thread_id) > 0:
             payload["message_thread_id"] = int(thread_id)
 
-        response = requests.post(url, json=payload, timeout=10, proxies={"http": None, "https": None})
+        response = _telegram_post(url, payload, timeout=10, proxies={"http": None, "https": None})
+        if response is None:
+            return False, None
 
         if response.status_code == 200:
             result_data = response.json()
@@ -71,11 +148,11 @@ def send_telegram(chat_id: str, thread_id: int, text: str, bot_token: str = None
             logger.info(f"Telegram message sent to {chat_id} (msg_id: {message_id})")
             return True, message_id
         else:
-            logger.error(f"Telegram API error: {response.status_code} - {response.text}")
+            logger.error("Telegram API error: %s - %s", response.status_code, redact_secrets(response.text))
             return False, None
 
     except Exception as e:
-        logger.error(f"Failed to send Telegram message: {e}")
+        logger.error("Failed to send Telegram message: %s", redact_secrets(e))
         return False, None
 
 
@@ -125,7 +202,7 @@ def send_matrix_message(text: str, room_id: str = None,
             return False, ""
 
     except Exception as e:
-        logger.error(f"Failed to send Matrix message: {e}")
+        logger.error("Failed to send Matrix message: %s", redact_secrets(e))
         return False, ""
 
 def edit_matrix_message(text: str, event_id: str, room_id: str = None,
@@ -177,7 +254,7 @@ def edit_matrix_message(text: str, event_id: str, room_id: str = None,
             return False
 
     except Exception as e:
-        logger.error(f"Failed to edit Matrix message: {e}")
+        logger.error("Failed to edit Matrix message: %s", redact_secrets(e))
         return False
 
 
@@ -197,7 +274,7 @@ def send_webhook(url: str, payload: dict) -> bool:
             logger.error(f"Webhook failed: {response.status_code} - {response.text}")
             return False
     except Exception as e:
-        logger.error(f"Failed to send Webhook: {e}")
+        logger.error("Failed to send Webhook: %s", redact_secrets(e))
         return False
 
 
@@ -232,7 +309,7 @@ def send_sms(receptor: str, message: str, api_key: str, sender: str = None) -> b
             return False
 
     except Exception as e:
-        logger.error(f"Failed to send SMS: {e}")
+        logger.error("Failed to send SMS: %s", redact_secrets(e))
         return False
 
 
@@ -288,7 +365,9 @@ def send_telegram_proxied(chat_id: str, thread_id: int, text: str,
             payload["message_thread_id"] = int(thread_id)
 
         logger.info(f"📡 Sending Telegram via proxy: {base}")
-        response = requests.post(url, json=payload, timeout=15)
+        response = _telegram_post(url, payload, timeout=15)
+        if response is None:
+            return False, None
 
         if response.status_code == 200:
             result_data = response.json()
@@ -296,11 +375,11 @@ def send_telegram_proxied(chat_id: str, thread_id: int, text: str,
             logger.info(f"✅ Telegram proxy message sent to {chat_id} (msg_id: {message_id})")
             return True, message_id
         else:
-            logger.error(f"❌ Telegram proxy API error: {response.status_code} - {response.text}")
+            logger.error("Telegram proxy API error: %s - %s", response.status_code, redact_secrets(response.text))
             return False, None
 
     except Exception as e:
-        logger.error(f"Failed to send Telegram message via proxy: {e}")
+        logger.error("Failed to send Telegram message via proxy: %s", redact_secrets(e))
         return False, None
 
 
@@ -364,15 +443,57 @@ def edit_telegram_message(chat_id: str, message_id: int, text: str, bot_token: s
 
         # If it's direct to api.telegram.org, ignore system proxies
         req_proxies = {"http": None, "https": None} if "api.telegram.org" in url else None
-        response = requests.post(url, json=payload, timeout=15, proxies=req_proxies)
+        response = _telegram_post(url, payload, timeout=15, proxies=req_proxies)
+        if response is None:
+            return False
 
         if response.status_code == 200:
             logger.info(f"✅ Telegram message {message_id} edited successfully")
             return True
+        elif response.status_code == 400 and "message is not modified" in response.text.lower():
+            # Telegram reports an idempotent no-op as HTTP 400. The desired
+            # message state is already present, so delivery is successful.
+            logger.info(f"Telegram message {message_id} already up to date")
+            return True
         else:
-            logger.error(f"❌ Telegram Edit API error: {response.status_code} - {response.text}")
+            logger.error("Telegram Edit API error: %s - %s", response.status_code, redact_secrets(response.text))
             return False
 
     except Exception as e:
-        logger.error(f"Failed to edit Telegram message: {e}")
+        logger.error("Failed to edit Telegram message: %s", redact_secrets(e))
         return False
+
+
+def delete_telegram_message(chat_id: str, message_id: int, bot_token: str = None, proxy_base_url: str = None) -> bool:
+    """Delete a Telegram message when Bot API policy permits it."""
+    token = bot_token or TELEGRAM_BOT_TOKEN
+    if not token or not chat_id or not message_id:
+        return False
+    base = (proxy_base_url or "https://api.telegram.org").rstrip("/")
+    url = f"{base}/bot{token}/deleteMessage"
+    response = _telegram_post(url, {"chat_id": chat_id, "message_id": message_id}, timeout=10)
+    if response is not None and response.status_code == 200:
+        return True
+    if response is not None:
+        logger.warning("Telegram delete failed: %s - %s", response.status_code, redact_secrets(response.text))
+    return False
+
+
+def redact_matrix_message(event_id: str, room_id: str, homeserver_url: str = None,
+                          access_token: str = None, reason: str = "Incident resolved") -> bool:
+    """Redact a Matrix event; caller may fall back to an edit if forbidden."""
+    hs_url = (homeserver_url or MATRIX_HOMESERVER_URL).rstrip("/")
+    token = access_token or MATRIX_ACCESS_TOKEN
+    if not hs_url or not token or not room_id or not event_id:
+        return False
+    from urllib.parse import quote
+    txn_id = f"resolve-{int(time.time() * 1000)}"
+    url = f"{hs_url}/_matrix/client/v3/rooms/{quote(room_id, safe='')}/redact/{quote(str(event_id), safe='')}/{txn_id}"
+    try:
+        response = requests.put(url, json={"reason": reason}, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        if response.status_code in (200, 201):
+            return True
+        logger.warning("Matrix redaction failed: %s - %s", response.status_code, redact_secrets(response.text))
+    except requests.RequestException as exc:
+        logger.warning("Matrix redaction request failed: %s", redact_secrets(exc))
+    return False

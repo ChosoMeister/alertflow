@@ -13,6 +13,8 @@ import { AlertCircle, ChevronRight, RefreshCcw, Search, Send } from 'lucide-reac
 import useSWR from 'swr';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from 'sonner';
+import { IncidentDrawer } from '@/components/incident-drawer';
+import { Bookmark, Command, SlidersHorizontal } from 'lucide-react';
 
 interface Alert {
     id: string;
@@ -37,6 +39,8 @@ export default function AlertsPage() {
     const [filter, setFilter] = useState<{ status?: string; severity?: string; q?: string }>({ status: 'open' });
     const [searchInput, setSearchInput] = useState('');
     const [isSendingSummary, setIsSendingSummary] = useState(false);
+    const [selectedAlert, setSelectedAlert] = useState<string | null>(null);
+    const [density, setDensity] = useState<'comfortable' | 'compact'>('comfortable');
 
     // Read query params on mount (from Analytics clickable links)
     useEffect(() => {
@@ -101,8 +105,9 @@ export default function AlertsPage() {
                 <div className="flex flex-col gap-6 mb-6">
                     <div className="flex items-center justify-between">
                         <div>
-                            <h1 className="text-3xl font-bold">{t('title')}</h1>
-                            <p className="text-muted-foreground">{t('subtitle')}</p>
+                            <p className="eyebrow">Incident workspace</p>
+                            <h1 className="mt-2 text-3xl font-semibold tracking-tight">{t('title')}</h1>
+                            <p className="mt-1 text-muted-foreground">Prioritize, investigate and respond without losing context.</p>
                         </div>
                         <div className="flex items-center gap-2">
                             <Button variant="secondary" onClick={handleForceSummary} disabled={isSendingSummary}>
@@ -113,11 +118,12 @@ export default function AlertsPage() {
                                 <RefreshCcw className={`h-4 w-4 ltr:mr-2 rtl:ml-2 ${isLoading && alerts ? 'animate-spin' : ''}`} />
                                 {t('refresh')}
                             </Button>
+                            <button onClick={() => setDensity(value => value === 'compact' ? 'comfortable' : 'compact')} className="icon-button" title="Toggle density"><SlidersHorizontal className="h-4 w-4"/></button>
                         </div>
                     </div>
 
                     <div className="flex flex-col xl:flex-row items-start xl:items-center justify-between gap-4">
-                        <div className="flex bg-muted p-1 rounded-md border w-full xl:w-auto overflow-x-auto">
+                        <div className="flex bg-white/[.03] p-1 rounded-xl border border-white/10 w-full xl:w-auto overflow-x-auto">
                             <button
                                 onClick={() => setFilter({ ...filter, status: undefined })}
                                 className={`px-4 py-1.5 text-sm font-medium rounded-sm transition-all whitespace-nowrap ${!filter.status ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
@@ -178,6 +184,9 @@ export default function AlertsPage() {
                             </select>
                         </div>
                     </div>
+                    <div className="flex flex-wrap items-center gap-2"><span className="me-1 flex items-center gap-1.5 text-xs text-slate-500"><Bookmark className="h-3.5 w-3.5"/>Saved views</span>{[
+                        ['Critical open', { status: 'open', severity: 'Critical' }], ['Outside SLA', { status: 'open', q: 'SLA' }], ['AI failed', { q: 'analysis failed' }], ['Delivery failed', { q: 'delivery failed' }]
+                    ].map(([label, view]: any) => <button key={label} onClick={() => { setFilter(view); setSearchInput(view.q || ''); }} className="rounded-full border border-white/10 px-3 py-1.5 text-xs text-slate-400 transition hover:border-cyan-400/30 hover:text-cyan-200">{label}</button>)}<span className="ms-auto hidden items-center gap-1 text-[11px] text-slate-600 lg:flex"><Command className="h-3 w-3"/>⌘K for quick navigation</span></div>
                 </div>
 
                 {isLoading && !alerts ? (
@@ -219,12 +228,12 @@ export default function AlertsPage() {
                         {alerts?.map((alert) => (
                             <Card
                                 key={alert.id}
-                                className="cursor-pointer hover:border-primary/50 transition-colors"
-                                onClick={() => router.push(`/alerts/${alert.id}`)}
+                                className="cursor-pointer overflow-hidden border-white/10 bg-slate-900/50 transition-all hover:-translate-y-0.5 hover:border-cyan-400/30 hover:shadow-lg hover:shadow-cyan-950/20"
+                                onClick={() => setSelectedAlert(alert.id)}
                             >
-                                <CardContent className="py-4">
-                                    <div className="flex items-center justify-between">
-                                        <div className="flex items-center gap-4">
+                                <CardContent className={density === 'compact' ? 'py-3' : 'py-5'}>
+                                    <div className="grid gap-4 md:grid-cols-[1fr_auto] md:items-center">
+                                        <div className="flex min-w-0 items-start gap-4">
                                             <div className={`p-2 rounded-lg ${alert.severity === 'Critical' ? 'bg-red-500/10' :
                                                     alert.severity === 'High' ? 'bg-orange-500/10' :
                                                         alert.severity === 'Medium' ? 'bg-yellow-500/10' :
@@ -242,15 +251,13 @@ export default function AlertsPage() {
                                                         {alert.category}
                                                     </span>
                                                 </div>
-                                                <p className="font-medium mt-1 truncate" dir="auto">
-                                                    {truncate(alert.subject || alert.main_message || t('no_subject'), 80)}
+                                                <p className="font-medium mt-2 line-clamp-2 leading-6" dir="auto">
+                                                    {truncate(alert.main_message || alert.subject || t('no_subject'), 180)}
                                                 </p>
-                                                <p className="text-sm text-muted-foreground mt-0.5" dir="ltr">
-                                                    {alert.from_email} • {alert.system_name || t('unknown_system')}
-                                                </p>
+                                                <div className="mt-2 flex flex-wrap gap-2"><span className="resource-chip">{alert.system_name || t('unknown_system')}</span><span className="truncate text-xs text-muted-foreground" dir="ltr">{alert.from_email}</span></div>
                                             </div>
                                         </div>
-                                        <div className="flex items-center gap-4">
+                                        <div className="flex items-center justify-between gap-4 md:justify-end">
                                             <div className="ltr:text-right rtl:text-left">
                                                 <span className={`text-xs px-2 py-1 rounded border ${statusColor(alert.status)}`}>
                                                     {alert.status ? t(`status_${alert.status.replace(' (Merged)', '').toLowerCase()}`) : alert.status}
@@ -259,7 +266,7 @@ export default function AlertsPage() {
                                                     {formatDate(alert.created_at)}
                                                 </p>
                                             </div>
-                                            <ChevronRight className="h-5 w-5 text-muted-foreground ltr:rotate-0 rtl:rotate-180" />
+                                            <ChevronRight className="h-5 w-5 text-cyan-400/60 ltr:rotate-0 rtl:rotate-180" />
                                         </div>
                                     </div>
                                 </CardContent>
@@ -267,6 +274,7 @@ export default function AlertsPage() {
                         ))}
                     </div>
                 )}
+                <IncidentDrawer alertId={selectedAlert} token={token} onClose={() => setSelectedAlert(null)} onChanged={() => mutate()} />
             </main>
         </div>
     );

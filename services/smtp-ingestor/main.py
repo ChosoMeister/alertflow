@@ -10,6 +10,7 @@ import logging
 import asyncio
 import time
 import threading
+import uuid
 from datetime import datetime
 from email import message_from_bytes
 from email.policy import default
@@ -142,10 +143,25 @@ class EmailHandler:
                 "html": html_body,
                 "rcpt_tos": rcpt_tos,
                 "received_at": datetime.utcnow().isoformat(),
+                "ingestion_transport": "smtp",
             }
 
-            # Push to Redis queue
-            redis_client.rpush(REDIS_QUEUE, json.dumps(payload))
+            # Publish to a durable Redis Stream. The processor ACKs only after
+            # processing, allowing abandoned messages to be reclaimed.
+            trace_id = str(uuid.uuid4())[:8]
+            payload["trace_id"] = trace_id
+            redis_client.xadd(
+                "alerts:stream",
+                {"payload": json.dumps(payload), "trace_id": trace_id},
+                maxlen=100000,
+                approximate=True,
+            )
+            day = datetime.utcnow().strftime("%Y-%m-%d")
+            pipe = redis_client.pipeline(transaction=False)
+            pipe.hincrby("metrics:ingestion", "smtp_accepted", 1)
+            pipe.hincrby(f"metrics:ingestion:daily:{day}", "smtp_accepted", 1)
+            pipe.expire(f"metrics:ingestion:daily:{day}", 86400 * 14)
+            pipe.execute()
 
             logger.info(f"Email queued: From={sender}, Subject={subject[:50]}")
             add_log("INFO", f"Email queued from {sender}", {"subject": subject[:100]})

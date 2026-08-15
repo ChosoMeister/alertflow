@@ -1,6 +1,8 @@
 import json
 import logging
 import redis
+import uuid
+from datetime import datetime
 from fastapi import APIRouter, Request, Header, HTTPException, status
 from config import get_settings
 
@@ -101,7 +103,10 @@ async def receive_webhook(
     # 7. Push to Redis queue
     try:
         r = get_redis()
-        r.lpush("alert_queue", json.dumps(payload))
+        trace_id = str(uuid.uuid4())[:8]
+        payload["trace_id"] = trace_id
+        payload["queued_at"] = datetime.utcnow().isoformat()
+        r.xadd("alerts:stream", {"payload": json.dumps(payload), "trace_id": trace_id}, maxlen=100000, approximate=True)
         logger.info(f"Queued webhook alert from {source_name} (Subject: {subject[:50]})")
     except Exception as e:
         logger.error(f"Error queueing webhook alert: {e}")

@@ -40,14 +40,14 @@ The product is designed for the gap between monitoring and incident response. Mo
 
 AlertFlow provides two input paths that converge on the same Redis-backed processing pipeline:
 
-- **SMTP ingest:** an asynchronous `aiosmtpd` service receives email envelopes, extracts text/HTML content and recipients, and pushes normalized payloads to `alert_queue`.
+- **SMTP ingest:** an asynchronous `aiosmtpd` service receives email envelopes, extracts text/HTML content and recipients, assigns a trace ID, and appends the normalized payload to the durable `alerts:stream` Redis Stream.
 - **HTTP webhook ingest:** `POST /api/webhook/{source_name}` accepts arbitrary JSON or plain text, requires `X-Webhook-Token`, rejects payloads larger than 512 KB, and converts the request into the same internal message format as SMTP.
 
 This makes it possible to connect traditional email-only products and modern webhook-capable systems without maintaining separate processing logic.
 
 ### 2. Structured AI analysis
 
-The processor calls an OpenAI-compatible `/chat/completions` endpoint. Providers are managed dynamically in Redis through the UI/API; environment variables provide a fallback provider when none is configured.
+The processor calls OpenAI-compatible `/chat/completions` endpoints, including Ollama and vLLM. Providers are managed dynamically in Redis through the UI/API; a bounded fallback chain can try up to `AI_MAX_PROVIDER_ATTEMPTS` providers, while environment variables remain the bootstrap fallback. Optional source adapters normalize known sender formats before inference.
 
 The model is required to return JSON with this operational schema:
 
@@ -71,14 +71,14 @@ The model is required to return JSON with this operational schema:
 }
 ```
 
-Only the first 4,000 characters of the alert body are sent for analysis. Provider timeout is configurable and defaults to 120 seconds. If AI analysis fails, AlertFlow can still dispatch a raw fallback notification; an AI outage does not have to become an alert-loss event.
+The input budget is configurable with `AI_BODY_MAX_CHARS` and defaults to 2,500 characters so fallback models with smaller context windows remain usable. Provider timeout defaults to 120 seconds. Model output is validated against source evidence: unsupported resource, storage, status, and remediation claims are rejected or downgraded instead of being presented as facts. If every AI provider fails, AlertFlow can still dispatch a redacted raw fallback notification without creating an extra incident.
 
 ### 3. Deduplication and incident correlation
 
 AlertFlow uses two layers of noise reduction:
 
 1. **Exact deduplication** hashes sender, normalized subject, and the first 200 body characters. Identical alerts are dropped inside a rolling 30-minute window.
-2. **Incident correlation** loads up to 10 textually relevant open incidents from the sender domain and passes that context to the model. The model classifies the incoming event as `NEW`, `UPDATE`, or `RESOLVE` and points to a matching incident when applicable.
+2. **Incident correlation** combines deterministic source/resource identities with up to 10 textually relevant open incidents. The model classifies the incoming event as `NEW`, `UPDATE`, or `RESOLVE`, while deterministic reconciliation protects incident identity when mixed Grafana states or ambiguous recovery events arrive.
 
 The internal incident transition is:
 
@@ -92,7 +92,7 @@ matching RESOLVE ─────────────┴► CLOSED incident
                                   edit existing notification
 ```
 
-Open incident state and outbound message IDs are stored in Redis for seven days. This allows AlertFlow to update Telegram and Matrix messages when an incident repeats, is acknowledged, or resolves.
+Incident state, indexed event history, routing snapshots, per-destination delivery revisions, and outbound message IDs are stored in Redis. This allows AlertFlow to update Telegram and Matrix messages when an incident repeats, is acknowledged, or resolves without silently moving an existing incident after a Rule change.
 
 ### 4. Routing engine
 
@@ -104,13 +104,13 @@ alert@monitoring.local
 security-*@example.com
 ```
 
-Each rule can define:
+Routing is destination-only and separates reusable configuration into three objects:
 
-- legacy Telegram/Matrix destinations;
-- one or more dynamic notification-channel IDs;
-- per-channel chat, thread, room, receptor, or URL overrides;
-- a preferred AI provider;
-- a severity matrix that replaces the normal targets for selected severity levels.
+- **Connector:** transport credentials, such as a Telegram bot token or Matrix access token;
+- **Destination:** endpoint coordinates, such as a Telegram chat/thread, Matrix room, webhook URL, or SMS receptor;
+- **Rule:** alert destinations, optional severity-specific destinations, optional resolved destinations, and a preferred AI provider.
+
+Resolution delivery supports `legacy` (edit in place), `copy` (archive a complete resolution card), and `move` (deliver the resolution card, then remove/tombstone active messages). Rules snapshot their destinations when an incident opens, preserving message identity across later configuration changes.
 
 The `/api/routing-rules/test-match` and `/api/test-email/preview` endpoints let engineers validate rule behavior before sending production traffic.
 
@@ -123,11 +123,11 @@ The `/api/routing-rules/test-match` and `/api/test-email/preview` endpoints let 
 | Generic webhook | POST a structured payload to a configured URL. |
 | Kavenegar SMS | Send a compact notification to the configured receptor and sender. |
 
-Channel credentials and destinations are stored in Redis and managed through authenticated API/UI operations. Routing rules reference channel IDs, making channels reusable across multiple routes.
+Connector credentials are write-only through the API: list/read responses expose presence metadata rather than returning stored secrets. Destinations reference connectors and Rules reference Destination IDs, allowing one connector to safely serve multiple chats, threads, rooms, or receptors.
 
 ### 6. Delivery reliability
 
-Failed outbound delivery is scheduled in a Redis sorted set. AlertFlow retries the already formatted message without rerunning AI analysis:
+Failed outbound delivery is scheduled in a Redis sorted set. Delivery state is tracked independently per Destination: if Telegram succeeds and Matrix fails, only Matrix is retried. Retries carry an incident revision and are discarded as superseded when newer incident state has already been delivered; AI analysis and correlation are not rerun.
 
 | Attempt | Delay |
 | --- | ---: |
@@ -136,16 +136,18 @@ Failed outbound delivery is scheduled in a Redis sorted set. AlertFlow retries t
 | 3 | 30 minutes |
 | 4 | 2 hours |
 
-After the fourth failed retry, the item moves to `alert_dead_letter_queue`. Operators can inspect retry/DLQ contents, flush the DLQ, or requeue individual entries through the API and dashboard.
+After the fourth failed retry, the active failure moves to `alert_dead_letter_queue` with lifecycle and deduplication metadata. Operators can distinguish active failures from superseded/historical records, inspect retry/DLQ contents, flush the DLQ, or requeue individual entries through the API and dashboard. Telegram transport failures also participate in circuit breaking, while formatting failures receive a plain-text fallback.
 
 ### 7. Operations and observability
 
 - Processor heartbeat every 5 seconds with a 15-second Redis TTL.
-- Queue depth, retry depth, DLQ depth, processed/error/muted counters.
-- Structured application logs stored in a capped Redis stream.
+- Redis Stream depth, pending consumer claims, retry depth, active/superseded DLQ depth, and ingestion-to-processing reconciliation counters.
+- Structured application logs plus container logs collected by Grafana Alloy into a local, short-retention Loki store.
 - Relay logs containing destination and delivery status.
-- Live dashboard updates over authenticated Server-Sent Events.
-- Analytics for open, duplicate, acknowledged, resolved, and sender-level activity.
+- Live dashboard updates over cookie-authenticated Server-Sent Events without putting JWTs in query URLs.
+- Prometheus-format metrics for queues, provider attempts/failures/latency, routing, source volume, analysis quality, disk pressure, Loki growth, and self-monitoring canaries.
+- Incident command center with indexed pagination, event timelines, impact/resource normalization, delivery evidence, command palette, and action-safety hints.
+- Per-source and global storm controls, bounded summary catch-up, disaster digest, and daily incident reports.
 - Configurable alert retention from 1 to 365 days; default is 14 days.
 - Scheduled daily summaries with configurable Telegram bot, chat, thread, time, and timezone.
 
@@ -165,7 +167,7 @@ After the fourth failed retry, the item moves to `alert_dead_letter_queue`. Oper
                                ▼
                     ┌─────────────────────┐
                     │ Redis 7            │
-                    │ queue + state + AOF │
+                    │ Streams + state + AOF│
                     └───────┬─────────────┘
                             ▼
               ┌──────────────────────────────┐
@@ -177,6 +179,8 @@ After the fourth failed retry, the item moves to `alert_dead_letter_queue`. Oper
        ┌──────────────┘           └───────────────┐
        ▼                                          ▼
  Telegram · Matrix · Webhook · SMS       Retry queue → DLQ
+
+       Docker logs ─────► Alloy ─────► Loki ─────► authenticated API
 
                     ┌─────────────────────┐
                     │ FastAPI REST + SSE  │
@@ -196,7 +200,8 @@ After the fourth failed retry, the item moves to `alert_dead_letter_queue`. Oper
 | `alert-processor` | Python, Redis, requests | Filtering, deduplication, routing, AI analysis, incident state, dispatch, retry, summaries. |
 | `api-server` | FastAPI, Pydantic, JWT | Control-plane API, webhook intake, health, analytics, authentication, SSE. |
 | `web-ui` | Next.js 14, React 18, next-intl, SWR | Bilingual operations and administration interface. |
-| `redis` | Redis 7 with AOF | Queue, configuration, credentials, alert/incident state, metrics, logs, retry and DLQ. |
+| `redis` | Redis 7 with AOF | Streams, configuration, connector secrets, incident timelines, metrics, retry and DLQ. |
+| `alloy` / `loki` | Grafana Alloy and Loki | Container-log collection and short-retention authenticated log search. |
 
 ## Quick start
 
@@ -226,10 +231,11 @@ OLLAMA_BASE_URL=http://host.docker.internal:11434/v1/chat/completions
 OLLAMA_MODEL=your-model-name
 
 CORS_ORIGINS=http://localhost:3000
+COOKIE_SECURE=false
 NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
-Generate suitable values with `openssl rand -hex 32`. `NEXT_PUBLIC_API_URL` is embedded at web-image build time; rebuild `web-ui` after changing it.
+Generate suitable values with `openssl rand -hex 32`. Use `COOKIE_SECURE=false` only for local HTTP evaluation; production HTTPS deployments should keep it `true`. `NEXT_PUBLIC_API_URL` is embedded at web-image build time, so rebuild `web-ui` after changing it.
 
 SMTP authentication is disabled when `SMTP_USERNAME` and `SMTP_PASSWORD` are empty. Enable authentication before exposing the listener outside a trusted network.
 
@@ -299,11 +305,12 @@ Use the generated OpenAPI document at `/docs` as the authoritative request/respo
 
 ## Security model
 
-- JWT access tokens use configurable HS256 secrets and expiry.
+- JWT sessions use configurable HS256 secrets and expiry and are transported in secure, HTTP-only cookies; SSE no longer places access tokens in URLs.
 - Passwords are stored with bcrypt; legacy SHA-256 hashes are upgraded after successful authentication.
 - Administrative mutations use role checks; read and operational access require a valid user token.
 - Redis requires a password and is bound to `127.0.0.1` on the host by the default Compose file.
 - The inbound webhook has an independent shared secret and 512 KB body limit.
+- Connector credentials are write-only in API responses and notification errors are credential-redacted before logging.
 - CORS origins are configurable and should be explicit in production.
 - SMTP authentication and STARTTLS are configurable but TLS certificate provisioning and reverse-proxy TLS termination remain deployment responsibilities.
 
@@ -315,9 +322,10 @@ AlertFlow intentionally uses Redis as both its messaging layer and operational d
 
 - Redis AOF is enabled in the supplied Compose configuration.
 - Alert and relay-log cleanup runs hourly using the configured retention window.
-- Incident correlation state expires after seven days.
-- The processor currently consumes `alert_queue` as a single logical worker pipeline.
-- The default Redis memory cap is 512 MB with `allkeys-lru` eviction.
+- Incident and DLQ retention default to seven days and are independently configurable.
+- The processor consumes `alerts:stream` through a Redis consumer group, acknowledges only completed work, and reclaims abandoned pending messages.
+- The default Redis memory cap is 512 MB with `noeviction`, preventing silent loss of operational keys at the cost of rejecting writes when capacity is exhausted.
+- Loki stores local container logs with a short retention window; Alloy state and Loki data use named volumes.
 - There is no external relational database or object store in the current architecture.
 
 For high-volume or regulated environments, evaluate Redis persistence, backup, replication/Sentinel, secret management, network isolation, and retention requirements before production rollout.
@@ -361,6 +369,7 @@ docker compose --env-file .env.example config --quiet
 - Exact deduplication is intentionally time-windowed and signature-based, not a general semantic deduplicator.
 - The UI can test Telegram, Matrix, and webhook channels; the SMS channel test endpoint is currently informational.
 - Secrets are stored in Redis rather than an external secrets manager.
+- Loki and Alloy require Docker socket/log access and should be reviewed against the host security policy.
 - SMTP STARTTLS configuration is available, but certificate lifecycle automation is outside the project.
 
 These boundaries are documented so teams can evaluate AlertFlow accurately rather than treating a compact self-hosted platform as a fully managed enterprise service.
@@ -396,7 +405,7 @@ SMTP / Webhook
 Normalize + Validate
       │
       ▼
-Redis alert_queue
+Redis alerts:stream + consumer group
       │
       ▼
 Mute check
@@ -423,7 +432,7 @@ Format + Dispatch
 
 ### مرحله ۱: دریافت و normalize
 
-سرویس `smtp-ingestor` با استفاده از `aiosmtpd` envelope و محتوای MIME ایمیل را دریافت می‌کند و فیلدهای sender، recipient، subject، text و HTML را به `alert_queue` می‌فرستد.
+سرویس `smtp-ingestor` با استفاده از `aiosmtpd` envelope و محتوای MIME ایمیل را دریافت می‌کند، trace ID می‌سازد و فیلدهای sender، recipient، subject، text و HTML را به Redis Stream با نام `alerts:stream` می‌فرستد. processor تنها پس از تکمیل پردازش پیام را ACK می‌کند و claimهای رهاشده قابل بازیابی هستند.
 
 برای سیستم‌هایی که webhook دارند، endpoint زیر در دسترس است:
 
@@ -446,11 +455,13 @@ alert@monitoring.local
 security-*@example.com
 ```
 
-خروجی rule علاوه بر مقصد می‌تواند provider مدل، channelهای پویا، override هر channel و severity matrix را تعیین کند. بنابراین برای مثال هشدار `Critical` می‌تواند مستقل از route عادی به مسیر escalation ارسال شود.
+مدل routing جدید سه لایه مستقل دارد: Connector فقط credential و transport را نگه می‌دارد، Destination مختصات مقصد مانند chat/thread/room/URL/receptor را مشخص می‌کند و Rule فقط Destination IDها را انتخاب می‌کند. credentialها در پاسخ API بازگردانده نمی‌شوند. هر Rule می‌تواند مقصدهای اصلی، مقصدهای severity، مقصدهای resolved و provider مدل را تعیین کند.
+
+برای رخداد resolved سه policy وجود دارد: `legacy` پیام فعال را درجا ویرایش می‌کند؛ `copy` کارت کامل resolution را در مقصد archive می‌سازد؛ و `move` ابتدا تحویل کامل به همه مقصدهای resolved را تضمین می‌کند و سپس پیام‌های فعال را حذف یا tombstone می‌کند. مقصدهای incident هنگام ایجاد snapshot می‌شوند تا تغییر بعدی Rule هویت پیام باز را جابه‌جا نکند.
 
 ### مرحله ۳: تحلیل AI و correlation
 
-AlertFlow حداکثر ۱۰ incident باز و مرتبط از domain فرستنده را بر اساس شباهت واژگان subject، body و target resource انتخاب می‌کند و به context مدل اضافه می‌کند. مدل باید یکی از actionهای زیر را برگرداند:
+AlertFlow از identity قطعی منبع/resource به‌همراه حداکثر ۱۰ incident باز و مرتبط استفاده می‌کند. context ورودی مدل محدود است و زنجیره fallback می‌تواند چند provider سازگار با OpenAI—از جمله Ollama و vLLM—را امتحان کند. خروجی مدل در برابر evidence متن اصلی validate می‌شود تا ادعاهای بدون پشتوانه درباره resource، storage، status یا remediation به‌عنوان fact نمایش داده نشوند. مدل باید یکی از actionهای زیر را برگرداند:
 
 - `NEW`: رخداد جدید است و یک incident با UUID مستقل ساخته می‌شود.
 - `UPDATE`: رخداد به incident باز موجود مربوط است؛ occurrence افزایش می‌یابد و اعلان موجود ویرایش می‌شود.
@@ -458,7 +469,7 @@ AlertFlow حداکثر ۱۰ incident باز و مرتبط از domain فرستن
 
 اگر مدل `UPDATE` یا `RESOLVE` بدهد ولی target معتبر وجود نداشته باشد، processor برای جلوگیری از اتصال اشتباه آن را به رخداد جدید تبدیل می‌کند یا در حالت resolve نامعتبر نادیده می‌گیرد.
 
-state مربوط به correlation و message ID کانال‌ها با TTL هفت‌روزه در Redis نگه‌داری می‌شود. این message IDها امکان edit کردن اعلان‌های Telegram و Matrix را فراهم می‌کنند.
+state مربوط به correlation، timeline رویدادها، snapshot مقصدها، revision تحویل و message ID هر Destination در Redis نگه‌داری می‌شود. این اطلاعات امکان edit اعلان، مشاهده تاریخچه کامل incident و retry مستقل مقصدهای شکست‌خورده را فراهم می‌کنند.
 
 ### مرحله ۴: ارسال و retry
 
@@ -471,7 +482,7 @@ AlertFlow در وضعیت فعلی از این channelها پشتیبانی می
 | Webhook خروجی | ارسال POST به URL و headerهای تعریف‌شده |
 | Kavenegar SMS | ارسال پیام به receptor با API key و sender |
 
-در صورت شکست dispatch، متن format‌شده بدون اجرای مجدد AI طبق برنامه زیر retry می‌شود:
+در صورت شکست dispatch، فقط Destinationهای ناموفق و بدون اجرای مجدد AI/correlation طبق برنامه زیر retry می‌شوند. هر retry به revision مشخصی از incident وابسته است و اگر state جدیدتری قبلاً تحویل شده باشد، retry قدیمی به‌عنوان superseded کنار گذاشته می‌شود:
 
 | تلاش | فاصله |
 | --- | ---: |
@@ -480,7 +491,7 @@ AlertFlow در وضعیت فعلی از این channelها پشتیبانی می
 | سوم | ۳۰ دقیقه |
 | چهارم | ۲ ساعت |
 
-پس از شکست تلاش چهارم، payload به `alert_dead_letter_queue` منتقل می‌شود. محتویات retry queue و DLQ از API و UI قابل مشاهده است و اپراتور می‌تواند یک آیتم را requeue یا DLQ را پاک کند.
+پس از شکست تلاش چهارم، payload همراه metadata مربوط به lifecycle و dedup به `alert_dead_letter_queue` منتقل می‌شود. UI رکوردهای active، superseded و historical را تفکیک می‌کند. خطاهای transport تلگرام وارد circuit breaker می‌شوند و خطاهای formatting یک بار با plain text امتحان می‌شوند.
 
 ## اجزای معماری
 
@@ -491,6 +502,7 @@ AlertFlow در وضعیت فعلی از این channelها پشتیبانی می
 | `api-server` | FastAPI، Pydantic، JWT | API مدیریتی، webhook ورودی، health، analytics و SSE |
 | `web-ui` | Next.js 14، React 18، next-intl، SWR | داشبورد عملیاتی و مدیریتی فارسی/انگلیسی |
 | `redis` | Redis 7 + AOF | صف، state، config، credential کانال‌ها، metric، log، retry و DLQ |
+| `alloy` و `loki` | Grafana Alloy و Loki | جمع‌آوری log کانتینرها و جست‌وجوی احرازشده با retention کوتاه |
 
 این معماری عمداً کوچک و قابل استقرار روی یک host طراحی شده است. Redis هم message broker و هم operational datastore است؛ بنابراین راه‌اندازی ساده می‌ماند، اما durability و scale نیز مستقیماً به طراحی Redis وابسته است.
 
@@ -498,6 +510,7 @@ AlertFlow در وضعیت فعلی از این channelها پشتیبانی می
 
 - مشاهده، جست‌وجو و فیلتر alertها بر اساس status و مشخصات رخداد
 - مشاهده جزئیات تحلیل AI، incident key، duplicate و action history
+- command center رخداد با timeline ایندکس‌شده، impact/resource، evidence تحویل و actionهای ایمن
 - تغییر وضعیت به acknowledged/resolved و ثبت کاربر و زمان اقدام
 - rerun تحلیل AI و resend دستی alert
 - مدیریت AI providerهای متعدد و تست اتصال آن‌ها
@@ -505,17 +518,20 @@ AlertFlow در وضعیت فعلی از این channelها پشتیبانی می
 - تعریف rule، preview و test-match قبل از ورود ترافیک واقعی
 - مشاهده health سرویس‌ها، queue depth، retry، DLQ، metric و log
 - داشبورد analytics بر اساس status، severity، sender و resolution
-- به‌روزرسانی بلادرنگ داشبورد با SSE احرازشده
+- به‌روزرسانی بلادرنگ داشبورد با SSE مبتنی بر cookie امن، بدون قرار دادن JWT در URL
+- جست‌وجوی logهای Loki از API احرازشده و metricهای Prometheus برای queue، AI، routing، disk و canary
+- کنترل alert storm در سطح source و کل سامانه، disaster digest و گزارش روزانه incident
 - تنظیم retention بین ۱ تا ۳۶۵ روز؛ مقدار پیش‌فرض ۱۴ روز
 - تولید summary روزانه یا اجرای دستی آن از پنل
 
 ## امنیت و کنترل دسترسی
 
-- احراز هویت control plane با JWT و secret قابل تنظیم
+- احراز هویت control plane با JWT داخل cookie امن و HTTP-only
 - hash رمز عبور با bcrypt و migration خودکار hashهای قدیمی SHA-256 پس از login موفق
 - roleهای `admin` و `operator` و محدود کردن عملیات مدیریتی به admin
 - رمز مستقل Redis و bind شدن port آن به `127.0.0.1` در Compose پیش‌فرض
 - token مستقل برای webhook ورودی
+- write-only بودن credentialهای Connector در API و redact کردن secretها از خطاهای notification
 - محدودیت اندازه payload ورودی webhook
 - CORS قابل تنظیم برای deployment واقعی
 - SMTP authentication و STARTTLS قابل تنظیم
@@ -550,10 +566,11 @@ OLLAMA_BASE_URL=http://host.docker.internal:11434/v1/chat/completions
 OLLAMA_MODEL=your-model-name
 
 CORS_ORIGINS=http://localhost:3000
+COOKIE_SECURE=false
 NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
-برای secret می‌توان از `openssl rand -hex 32` استفاده کرد. مقدار `NEXT_PUBLIC_API_URL` هنگام build شدن image رابط کاربری embed می‌شود؛ بعد از تغییر آن باید `web-ui` مجدداً build شود.
+برای secret می‌توان از `openssl rand -hex 32` استفاده کرد. `COOKIE_SECURE=false` فقط برای تست محلی روی HTTP است و در production مبتنی بر HTTPS باید `true` بماند. مقدار `NEXT_PUBLIC_API_URL` هنگام build شدن image رابط کاربری embed می‌شود؛ بعد از تغییر آن باید `web-ui` مجدداً build شود.
 
 اگر `SMTP_USERNAME` و `SMTP_PASSWORD` خالی باشند، authentication سرویس SMTP غیرفعال است. listener بدون authentication نباید روی شبکه عمومی در دسترس قرار گیرد.
 
@@ -612,12 +629,13 @@ curl -X POST http://localhost:8000/api/webhook/grafana \
 
 - deployment آماده پروژه single-host و مبتنی بر Docker Compose است؛ Kubernetes یا HA به‌صورت آماده ارائه نشده است.
 - Redis تنها datastore عملیاتی است و relational database یا object storage وجود ندارد.
-- AOF در Compose فعال است، سقف حافظه پیش‌فرض ۵۱۲ مگابایت و policy برابر `allkeys-lru` است.
+- AOF در Compose فعال است، سقف حافظه پیش‌فرض ۵۱۲ مگابایت و policy برابر `noeviction` است تا state عملیاتی به‌صورت خاموش حذف نشود؛ در پر شدن حافظه writeها fail خواهند شد.
 - پاک‌سازی alert و relay log هر ساعت و بر اساس retention تنظیم‌شده انجام می‌شود.
-- processor در معماری فعلی یک pipeline منطقی مصرف‌کننده `alert_queue` است.
+- processor از consumer group روی `alerts:stream` استفاده می‌کند، پیام کامل‌شده را ACK می‌کند و pending claim رهاشده را بازیابی می‌کند.
 - کیفیت semantic correlation به مدل انتخابی و کیفیت alert ورودی وابسته است.
 - تست SMS در UI/API فعلاً informational است، هرچند dispatch Kavenegar در processor پیاده‌سازی شده است.
 - secretها در Redis نگه‌داری می‌شوند و integration آماده با Vault یا secrets manager خارجی وجود ندارد.
+- Loki و Alloy به logها و Docker socket دسترسی دارند و باید با security policy میزبان تطبیق داده شوند.
 - provisioning و rotation گواهی TLS بر عهده لایه deployment است.
 
 بیان این محدودیت‌ها بخشی از معرفی فنی محصول است: تیم مصرف‌کننده باید بتواند پیش از PoC یا rollout، مرز مسئولیت AlertFlow و الزامات زیرساختی خود را دقیق ارزیابی کند.

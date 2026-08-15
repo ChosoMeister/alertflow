@@ -7,6 +7,11 @@ export function cn(...inputs: ClassValue[]) {
 
 export function formatDate(dateString: string): string {
     if (!dateString) return '';
+    const numeric = Number(dateString);
+    if (Number.isFinite(numeric) && numeric > 0) {
+        const milliseconds = numeric < 10_000_000_000 ? numeric * 1000 : numeric;
+        return new Date(milliseconds).toLocaleString();
+    }
     // Backend stores UTC timestamps without timezone marker.
     // Append 'Z' so the browser correctly interprets them as UTC
     // and toLocaleString() converts to the user's local timezone.
@@ -14,7 +19,7 @@ export function formatDate(dateString: string): string {
         ? dateString
         : dateString + 'Z';
     const date = new Date(utcString);
-    return date.toLocaleString();
+    return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString();
 }
 
 

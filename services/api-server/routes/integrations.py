@@ -4,7 +4,7 @@ Integrations API - Telegram and Matrix settings.
 from fastapi import APIRouter, Depends
 from typing import List
 
-from auth import User, get_current_user, require_admin
+from auth import User, get_current_user, require_admin, require_operator
 from models import IntegrationSettings
 from services.redis_service import get_redis_service
 
@@ -45,7 +45,7 @@ async def update_integration_settings(
 
 
 @router.post("/telegram/test")
-async def test_telegram(user: User = Depends(get_current_user)):
+async def test_telegram(user: User = Depends(require_operator)):
     """Send a test message to Telegram (default destination)."""
     # This will be handled by the processor
     redis_svc = get_redis_service()
@@ -66,7 +66,7 @@ async def test_telegram(user: User = Depends(get_current_user)):
 
 
 @router.post("/matrix/test")
-async def test_matrix(user: User = Depends(get_current_user)):
+async def test_matrix(user: User = Depends(require_operator)):
     """Send a test message to Matrix (default destination)."""
     redis_svc = get_redis_service()
 

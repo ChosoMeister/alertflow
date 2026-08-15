@@ -50,6 +50,11 @@ export default function SettingsPage() {
         alert_retention_days: 14,
         summary_telegram_chat_id: '',
         summary_telegram_thread_id: '0',
+        summary_telegram_bot_token: '',
+        global_storm_max_notifications: 20,
+        global_storm_window_seconds: 300,
+        storm_summary_interval_seconds: 300,
+        incident_sla_minutes: 60,
     });
     const [savingSettings, setSavingSettings] = useState(false);
 
@@ -61,6 +66,10 @@ export default function SettingsPage() {
                 summary_telegram_chat_id: generalSettings.summary_telegram_chat_id || '',
                 summary_telegram_thread_id: generalSettings.summary_telegram_thread_id || '0',
                 summary_telegram_bot_token: generalSettings.summary_telegram_bot_token || '',
+                global_storm_max_notifications: generalSettings.global_storm_max_notifications || 20,
+                global_storm_window_seconds: generalSettings.global_storm_window_seconds || 300,
+                storm_summary_interval_seconds: generalSettings.storm_summary_interval_seconds || 300,
+                incident_sla_minutes: generalSettings.incident_sla_minutes || 60,
             });
         }
     }, [generalSettings]);
@@ -72,7 +81,11 @@ export default function SettingsPage() {
                 alert_retention_days: settings.alert_retention_days,
                 summary_telegram_chat_id: settings.summary_telegram_chat_id,
                 summary_telegram_thread_id: settings.summary_telegram_thread_id,
-                summary_telegram_bot_token: settings.summary_telegram_bot_token
+                summary_telegram_bot_token: settings.summary_telegram_bot_token,
+                global_storm_max_notifications: settings.global_storm_max_notifications,
+                global_storm_window_seconds: settings.global_storm_window_seconds,
+                storm_summary_interval_seconds: settings.storm_summary_interval_seconds,
+                incident_sla_minutes: settings.incident_sla_minutes,
             });
             toast.success(t('success_settings_saved'));
         } catch (e: any) {
@@ -161,6 +174,24 @@ export default function SettingsPage() {
                                 <p className="text-xs text-muted-foreground">
                                     {t('alert_retention_desc')}
                                 </p>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 border-t pt-4">
+                                <div className="space-y-2">
+                                    <label className="text-sm font-medium">{t('storm_limit')}</label>
+                                    <Input type="number" min="5" max="500" value={settings.global_storm_max_notifications} onChange={(e) => setSettings({ ...settings, global_storm_max_notifications: parseInt(e.target.value) || 20 })} />
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-sm font-medium">{t('storm_window')}</label>
+                                    <Input type="number" min="60" max="3600" value={settings.global_storm_window_seconds} onChange={(e) => setSettings({ ...settings, global_storm_window_seconds: parseInt(e.target.value) || 300 })} />
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-sm font-medium">{t('storm_summary_interval')}</label>
+                                    <Input type="number" min="30" max="3600" value={settings.storm_summary_interval_seconds} onChange={(e) => setSettings({ ...settings, storm_summary_interval_seconds: parseInt(e.target.value) || 300 })} />
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-sm font-medium">{t('incident_sla')}</label>
+                                    <Input type="number" min="5" max="10080" value={settings.incident_sla_minutes} onChange={(e) => setSettings({ ...settings, incident_sla_minutes: parseInt(e.target.value) || 60 })} />
+                                </div>
                             </div>
                         </CardContent>
 

@@ -23,7 +23,8 @@ export default function LoginPage() {
 
         try {
             const result = await api.login(username, password);
-            localStorage.setItem('alertflow_token', result.access_token);
+            // The JWT is held only in the HttpOnly cookie; this is a non-secret UI marker.
+            localStorage.setItem('alertflow_token', 'cookie-session');
             localStorage.setItem('alertflow_user', JSON.stringify(result.user));
             router.push('/');
         } catch (err) {
